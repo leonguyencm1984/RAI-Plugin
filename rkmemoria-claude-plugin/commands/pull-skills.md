@@ -1,11 +1,11 @@
-# /rkm:pull-skills
+# /rai:pull-skills
 
 Pull skill bundles from the platform to `.rkm/skills/`.
 
 ## Usage
 
 ```
-/rkm:pull-skills [--all] [--slug <slug>...] [--tag <tag>] [--force]
+/rai:pull-skills [--all] [--slug <slug>...] [--tag <tag>] [--force]
 ```
 
 ## Steps

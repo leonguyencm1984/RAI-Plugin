@@ -1,4 +1,4 @@
-# /rkm:list-workflows
+# /rai:list-workflows
 
 List workflows available on the platform.
 

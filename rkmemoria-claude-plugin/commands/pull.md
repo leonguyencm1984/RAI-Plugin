@@ -1,4 +1,4 @@
-# /rkm:pull
+# /rai:pull
 
 Interactive picker to pull selected categories from the platform.
 
@@ -35,5 +35,5 @@ Refresh strategy: (•) only new/changed   ( ) force re-pull all
 
 ## Notes
 
-- Repo pulls are not included here — use `/rkm:pull-repos` (requires git on the machine).
-- Run `/rkm:status` first to see what's available before pulling.
+- Repo pulls are not included here — use `/rai:pull-repos` (requires git on the machine).
+- Run `/rai:status` first to see what's available before pulling.

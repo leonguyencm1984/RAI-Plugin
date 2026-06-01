@@ -1,11 +1,11 @@
-# /rkm:run-skill
+# /rai:run-skill
 
 Execute a pulled skill locally (script and hybrid runtimes only).
 
 ## Usage
 
 ```
-/rkm:run-skill <slug> [--input '<json>'] [--push]
+/rai:run-skill <slug> [--input '<json>'] [--push]
 ```
 
 ## Steps

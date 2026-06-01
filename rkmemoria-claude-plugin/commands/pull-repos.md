@@ -1,11 +1,11 @@
-# /rkm:pull-repos
+# /rai:pull-repos
 
 Clone or update git repositories to `.rkm/repos/`.
 
 ## Usage
 
 ```
-/rkm:pull-repos [--all] [--name <name>...] [--shallow] [--force]
+/rai:pull-repos [--all] [--name <name>...] [--shallow] [--force]
 ```
 
 ## Steps

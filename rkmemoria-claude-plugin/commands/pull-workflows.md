@@ -1,11 +1,11 @@
-# /rkm:pull-workflows
+# /rai:pull-workflows
 
 Pull workflows from the platform to `.rkm/workflows/`.
 
 ## Usage
 
 ```
-/rkm:pull-workflows [--all] [--id <id>...] [--force]
+/rai:pull-workflows [--all] [--id <id>...] [--force]
 ```
 
 ## Steps

@@ -1,4 +1,4 @@
-# /rkm:login
+# /rai:login
 
 Log in to your RKMemoria platform instance.
 

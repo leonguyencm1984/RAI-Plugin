@@ -1,0 +1,12 @@
+{
+  "name": "rai",
+  "version": "1.0.0",
+  "description": "RAI / RKMemoria knowledge base, skills, workflows, and code graph for Claude Code",
+  "mcpServers": {
+    "rai": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]
+    }
+  },
+  "skills": "./skills/"
+}

@@ -1,47 +1,48 @@
-# RKMemoria Claude Code Plugin
+# RAI Claude Code Plugin
 
-Brings your RKMemoria knowledge base, skills, workflows, and code graph into Claude Code.
-
-## Install
-
-```bash
-# Option A: Claude Code plugin install (when marketplace support lands)
-claude-code plugin install https://github.com/rikkeisoft/rkmemoria-claude-plugin
-
-# Option B: Manual symlink
-ln -s /Users/mac/Documents/Projects/RKMemoria/rkmemoria-claude-plugin ~/.claude/plugins/rkmemoria
-```
+Brings your RAI / RKMemoria knowledge base, skills, workflows, and code graph into Claude Code.
 
 ## Requirements
 
 - Python 3.11+
-- `pip install httpx mcp pyyaml`
-- A running RKMemoria platform instance
-- An MCPToken (create one in your profile: Settings → MCP Tokens)
+- `pip install httpx mcp pynacl`
+- A running RAI platform instance
+- An MCPToken (create one at `/profile` → **MCP tokens** tab → **+ New token**)
+
+## Install
+
+Register the plugin as a local marketplace and install it:
+
+```
+/plugin marketplace add <path-to-rkmemoria-claude-plugin>
+/plugin install rai@rai
+```
+
+Then restart Claude Code so the commands register.
 
 ## Quick start
 
 ```
-/rkm:login         # one-time setup — enter platform URL + MCPToken
-/rkm:status        # see what's available
-/rkm:pull          # interactive picker
+/rai:login         # one-time setup — enter platform URL + MCPToken
+/rai:status        # see what's available
+/rai:pull          # interactive picker
 ```
 
 ## Commands
 
 | Command                 | Purpose                               |
 | ----------------------- | ------------------------------------- |
-| `/rkm:login`          | Authenticate with your platform       |
-| `/rkm:status`         | Show pull status vs platform          |
-| `/rkm:pull`           | Interactive category picker           |
-| `/rkm:pull-workflows` | Pull workflows (scriptable)           |
-| `/rkm:pull-skills`    | Pull skill bundles (scriptable)       |
-| `/rkm:pull-repos`     | Clone repositories (scriptable)       |
-| `/rkm:pull-kb`        | Pull wiki + sources (scriptable)      |
-| `/rkm:push-skill`     | Push local skill edits back           |
-| `/rkm:run-skill`      | Execute a script/hybrid skill locally |
-| `/rkm:list-workflows` | List available workflows              |
-| `/rkm:run-workflow`   | Run a workflow by ID                  |
+| `/rai:login`          | Authenticate with your platform       |
+| `/rai:status`         | Show pull status vs platform          |
+| `/rai:pull`           | Interactive category picker           |
+| `/rai:pull-workflows` | Pull workflows (scriptable)           |
+| `/rai:pull-skills`    | Pull skill bundles (scriptable)       |
+| `/rai:pull-repos`     | Clone repositories (scriptable)       |
+| `/rai:pull-kb`        | Pull wiki + sources (scriptable)      |
+| `/rai:push-skill`     | Push local skill edits back           |
+| `/rai:run-skill`      | Execute a script/hybrid skill locally |
+| `/rai:list-workflows` | List available workflows              |
+| `/rai:run-workflow`   | Run a workflow by ID                  |
 
 ## Building a skill bundle (.skillpack)
 
@@ -131,15 +132,16 @@ unzip -l my-skill.skillpack
 ### Upload to platform
 
 ```bash
-TOKEN="your-jwt-token"
+TOKEN="your-mcp-token"
+BASE="http://localhost:8001"   # FastAPI backend port — adjust for your deployment
 
 # Dry-run (validate only — no DB write)
-curl -X POST http://localhost:8000/api/v1/skills/import/dry-run \
+curl -X POST $BASE/api/v1/skills/import/dry-run \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@my-skill.skillpack"
 
 # Import into a project
-curl -X POST http://localhost:8000/api/v1/skills/import \
+curl -X POST $BASE/api/v1/skills/import \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@my-skill.skillpack" \
   -F "on_conflict=replace" \
@@ -161,4 +163,4 @@ Or use the UI: **Skills → Import** — drop the file, review the dry-run previ
 
 - Your MCPToken is stored at `~/.rkm/config.json` (chmod 600). Never in the project repo.
 - Script-runtime skills execute with your user UID, no extra sandbox. Review `scripts/` before running — same trust model as `pip install` from your own org's registry.
-- Token can be revoked at any time from the platform UI (Settings → MCP Tokens).
+- Token can be revoked at any time from the platform UI: `/profile` → **MCP tokens** tab.

@@ -1,11 +1,11 @@
-# /rkm:run-workflow
+# /rai:run-workflow
 
 Run a platform workflow by ID.
 
 ## Usage
 
 ```
-/rkm:run-workflow <id> [--input '<json>']
+/rai:run-workflow <id> [--input '<json>']
 ```
 
 ## Steps
@@ -15,11 +15,11 @@ Run a platform workflow by ID.
 3. Display the run ID and initial status:
    ```
    Workflow run started: run_id=<id>, status=<status>
-   Use /rkm:run-status <run_id> to check progress.
+   Use /rai:run-status <run_id> to check progress.
    ```
-4. If the response is an error (e.g. 422 `server_execution_not_yet_enabled`), explain the limitation and suggest running the constituent skills locally with `/rkm:run-skill`.
+4. If the response is an error (e.g. 422 `server_execution_not_yet_enabled`), explain the limitation and suggest running the constituent skills locally with `/rai:run-skill`.
 
 ## Notes
 
 - Workflows with `server_executable: false` script steps will fail server-side until the sandbox phase ships.
-- Check `/rkm:list-workflows` for available IDs.
+- Check `/rai:list-workflows` for available IDs.

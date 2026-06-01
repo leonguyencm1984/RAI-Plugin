@@ -1,6 +1,6 @@
 """
 Local skill executor for script and hybrid runtimes.
-Invoked by /rkm:run-skill.
+Invoked by /rai:run-skill.
 """
 from __future__ import annotations
 

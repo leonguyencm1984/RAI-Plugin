@@ -1,0 +1,12 @@
+{
+  "name": "rai",
+  "owner": { "name": "RAI Platform" },
+  "metadata": { "description": "RAI Platform plugins for Claude Code" },
+  "plugins": [
+    {
+      "name": "rai",
+      "source": "./",
+      "description": "RAI / RKMemoria knowledge base, skills, workflows, and code graph"
+    }
+  ]
+}

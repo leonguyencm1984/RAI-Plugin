@@ -1,11 +1,11 @@
-# /rkm:push-skill
+# /rai:push-skill
 
 Push a locally edited skill bundle back to the platform.
 
 ## Usage
 
 ```
-/rkm:push-skill <slug> [--on-conflict replace|rename|skip]
+/rai:push-skill <slug> [--on-conflict replace|rename|skip]
 ```
 
 ## Steps

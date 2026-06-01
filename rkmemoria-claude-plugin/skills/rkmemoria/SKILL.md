@@ -4,13 +4,13 @@ You are working in a project directory that has the RKMemoria Claude Code plugin
 
 ## What the plugin provides
 
-- **`/rkm:login`** — Connect to your RKMemoria platform (one-time setup per machine)
-- **`/rkm:status`** — See what's pulled locally vs available on the platform
-- **`/rkm:pull`** — Interactive picker: pull workflows, skills, or knowledge base
-- **`/rkm:pull-skills`**, **`/rkm:pull-workflows`**, **`/rkm:pull-kb`**, **`/rkm:pull-repos`** — Scriptable per-category pull
-- **`/rkm:push-skill`** — Push a locally edited skill back to the platform
-- **`/rkm:run-skill`** — Execute a script or hybrid skill locally
-- **`/rkm:list-workflows`**, **`/rkm:run-workflow`** — Browse and trigger workflows
+- **`/rai:login`** — Connect to your RKMemoria platform (one-time setup per machine)
+- **`/rai:status`** — See what's pulled locally vs available on the platform
+- **`/rai:pull`** — Interactive picker: pull workflows, skills, or knowledge base
+- **`/rai:pull-skills`**, **`/rai:pull-workflows`**, **`/rai:pull-kb`**, **`/rai:pull-repos`** — Scriptable per-category pull
+- **`/rai:push-skill`** — Push a locally edited skill back to the platform
+- **`/rai:run-skill`** — Execute a script or hybrid skill locally
+- **`/rai:list-workflows`**, **`/rai:run-workflow`** — Browse and trigger workflows
 
 ## MCP tools available in every conversation
 
@@ -30,28 +30,28 @@ Once logged in, the following tools are active:
 ├── kb/
 │   ├── wiki/        # wiki pages as markdown
 │   └── sources/     # source metadata JSON
-└── repos/           # git clones (if /rkm:pull-repos was run)
+└── repos/           # git clones (if /rai:pull-repos was run)
 ```
 
 ## Typical workflows
 
 **Writing docs today:**
-`/rkm:pull-kb --wiki-only` → wiki pages available as markdown in `.rkm/kb/wiki/`
+`/rai:pull-kb --wiki-only` → wiki pages available as markdown in `.rkm/kb/wiki/`
 
 **Code review:**
-`/rkm:pull-repos --name <repo> --shallow` → checkout + `search_knowledge("AuthMiddleware")`
+`/rai:pull-repos --name <repo> --shallow` → checkout + `search_knowledge("AuthMiddleware")`
 
 **Running a skill:**
-`/rkm:pull-skills --slug summarize-meeting` → `/rkm:run-skill summarize-meeting --input '{"transcript": "..."}'`
+`/rai:pull-skills --slug summarize-meeting` → `/rai:run-skill summarize-meeting --input '{"transcript": "..."}'`
 
 **Editing and publishing a skill:**
-Edit `.rkm/skills/<slug>/SKILL.md` → `/rkm:push-skill <slug>`
+Edit `.rkm/skills/<slug>/SKILL.md` → `/rai:push-skill <slug>`
 
 ## Getting started
 
 If you haven't logged in yet:
 ```
-/rkm:login
+/rai:login
 ```
 
 You'll need an MCPToken from your platform profile (Settings → MCP Tokens).

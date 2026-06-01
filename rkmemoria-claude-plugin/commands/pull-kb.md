@@ -1,11 +1,11 @@
-# /rkm:pull-kb
+# /rai:pull-kb
 
 Pull knowledge base (sources and wiki pages) to `.rkm/kb/`.
 
 ## Usage
 
 ```
-/rkm:pull-kb [--all] [--wiki-only] [--sources-only] [--force]
+/rai:pull-kb [--all] [--wiki-only] [--sources-only] [--force]
 ```
 
 ## Steps

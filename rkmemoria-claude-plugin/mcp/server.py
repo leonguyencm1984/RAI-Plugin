@@ -31,7 +31,7 @@ LOCAL_RKM = Path.cwd() / ".rkm"
 
 def _load_config() -> dict:
     if not CONFIG_PATH.exists():
-        print("Not logged in. Run /rkm:login first.", file=sys.stderr)
+        print("Not logged in. Run /rai:login first.", file=sys.stderr)
         sys.exit(1)
     return json.loads(CONFIG_PATH.read_text())
 
@@ -338,9 +338,9 @@ async def _pull_skills(cfg: dict, args: dict) -> dict:
     dest.mkdir(parents=True, exist_ok=True)
 
     async with _client(cfg) as c:
-        resp = await c.get("/api/v1/skills/", params={"limit": 200})
+        resp = await c.get("/api/v1/skills/", params={"limit": 100})
         resp.raise_for_status()
-        skills = resp.json()
+        skills = resp.json()["items"]
 
     if not args.get("all"):
         if args.get("slugs"):
@@ -539,7 +539,7 @@ async def _pull_repos(cfg: dict, args: dict) -> dict:
     force = args.get("force", False)
     project_id = cfg.get("project_id")
     if not project_id:
-        return {"error": "No project_id in config. Run /rkm:login first."}
+        return {"error": "No project_id in config. Run /rai:login first."}
 
     etag_cache = _etag_cache()
     dest = LOCAL_RKM / "repos"
