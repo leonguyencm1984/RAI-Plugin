@@ -1,0 +1,77 @@
+schema_version: 1
+slug: api-doc-generator
+name: API Doc Generator
+description: Generates API documentation from Java source code and verifies docs against a running backend for the Adelie Sanyu project.
+version: 5.1.0
+tags:
+  - api
+  - documentation
+  - java
+  - adelie
+visibility: project
+runtime: script
+server_executable: false
+source_wiki_page_slugs: []
+variables:
+  - name: BASE_URL
+    description: Backend server base URL
+    default: http://localhost:8080
+    required: true
+    secret: false
+  - name: AUTH_TOKEN
+    description: Bearer token for authentication (leave empty to use username/password login)
+    required: false
+    secret: true
+  - name: AUTH_USERNAME
+    description: Username for auto-login when AUTH_TOKEN is empty
+    default: admin
+    required: true
+    secret: false
+  - name: AUTH_PASSWORD
+    description: Password for auto-login when AUTH_TOKEN is empty
+    required: true
+    secret: true
+  - name: LOGIN_ENDPOINT
+    description: Login endpoint path used for auto-login
+    default: /user/login
+    required: false
+    secret: false
+  - name: AES_KEY
+    description: AES encryption key required by the backend authentication flow
+    required: true
+    secret: true
+  - name: TIMEOUT
+    description: Request timeout in seconds
+    default: "30"
+    required: false
+    secret: false
+  - name: VERIFY_SSL
+    description: Enable SSL certificate verification (true/false)
+    default: "false"
+    required: false
+    secret: false
+  - name: DOCS_DIR
+    description: Path to the API documentation files directory (relative to project root or absolute)
+    default: ../documents
+    required: false
+    secret: false
+  - name: REPORT_OUTPUT_DIR
+    description: Directory where verification reports are written
+    default: reports
+    required: false
+    secret: false
+  - name: DRY_RUN
+    description: Parse docs only without making HTTP calls (true/false)
+    default: "true"
+    required: false
+    secret: false
+  - name: EXECUTE_WRITES
+    description: Execute POST/PUT/DELETE operations — set true only in test environments
+    default: "false"
+    required: false
+    secret: false
+  - name: VERBOSE
+    description: Enable verbose output
+    default: "false"
+    required: false
+    secret: false

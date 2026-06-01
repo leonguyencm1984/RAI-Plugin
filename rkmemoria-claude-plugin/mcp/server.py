@@ -65,6 +65,17 @@ server = Server("rkmemoria-plugin")
 async def list_tools() -> list[types.Tool]:
     return [
         types.Tool(
+            name="rkm_login",
+            description="Authenticate with the RKMemoria platform using the device authorization flow",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "platform_url": {"type": "string", "description": "Platform base URL, e.g. http://localhost:8001"},
+                },
+                "required": ["platform_url"],
+            },
+        ),
+        types.Tool(
             name="rkm_status",
             description="Show what's pulled locally vs available on the platform",
             inputSchema={"type": "object", "properties": {}},
@@ -120,6 +131,16 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="rkm_pull_repos",
+            description="Pull repository metadata for the current project to .rkm/repos/",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "force": {"type": "boolean", "default": False},
+                },
+            },
+        ),
+        types.Tool(
             name="rkm_list_workflows",
             description="List available workflows on the platform",
             inputSchema={"type": "object", "properties": {}},
@@ -143,6 +164,29 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {"run_id": {"type": "integer"}},
                 "required": ["run_id"],
+            },
+        ),
+        types.Tool(
+            name="rkm_run_skill_streaming",
+            description="Run a skill and stream stdout line-by-line until complete. Returns final output.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "integer", "description": "ID of an already-created SkillRun"},
+                },
+                "required": ["run_id"],
+            },
+        ),
+        types.Tool(
+            name="rkm_download_artifact",
+            description="Get a presigned download URL for a run artifact",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "integer"},
+                    "filename": {"type": "string", "description": "Artifact filename to download"},
+                },
+                "required": ["run_id", "filename"],
             },
         ),
         types.Tool(
@@ -175,6 +219,14 @@ async def list_tools() -> list[types.Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    # Login does not require existing config
+    if name == "rkm_login":
+        try:
+            result = await _login(arguments)
+        except Exception as exc:
+            result = {"error": str(exc)}
+        return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
     cfg = _load_config()
     try:
         if name == "rkm_status":
@@ -187,12 +239,18 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await _pull_kb(cfg, arguments)
         elif name == "rkm_push_skill":
             result = await _push_skill(cfg, arguments)
+        elif name == "rkm_pull_repos":
+            result = await _pull_repos(cfg, arguments)
         elif name == "rkm_list_workflows":
             result = await _list_workflows(cfg)
         elif name == "rkm_run_workflow":
             result = await _run_workflow(cfg, arguments)
         elif name == "rkm_run_status":
             result = await _run_status(cfg, arguments)
+        elif name == "rkm_run_skill_streaming":
+            result = await _run_skill_streaming(cfg, arguments)
+        elif name == "rkm_download_artifact":
+            result = await _download_artifact(cfg, arguments)
         elif name == "search_knowledge":
             result = await _search_knowledge(cfg, arguments)
         elif name == "get_wiki_page":
@@ -385,6 +443,63 @@ async def _pull_kb(cfg: dict, args: dict) -> dict:
 # Push skill
 # ---------------------------------------------------------------------------
 
+def _load_ignore_patterns(skill_dir: Path) -> list[str]:
+    """Read .rkmpackignore from the skill directory and return glob patterns."""
+    ignore_file = skill_dir / ".rkmpackignore"
+    if not ignore_file.exists():
+        return []
+    lines = ignore_file.read_text().splitlines()
+    return [l.strip() for l in lines if l.strip() and not l.startswith("#")]
+
+
+def _should_ignore(rel_path: str, patterns: list[str]) -> bool:
+    import fnmatch
+    return any(fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(Path(rel_path).name, p) for p in patterns)
+
+
+def _pack_skill(skill_dir: Path) -> bytes:
+    """Build a zip from the skill directory, honoring .rkmpackignore."""
+    import io, zipfile
+    patterns = _load_ignore_patterns(skill_dir)
+    always_skip = {".rkm-etag", ".rkmpackignore"}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(skill_dir.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = str(f.relative_to(skill_dir))
+            if f.name in always_skip:
+                continue
+            if _should_ignore(rel, patterns):
+                continue
+            zf.write(f, rel)
+    return buf.getvalue()
+
+
+def _sign_bundle(zip_bytes: bytes, slug: str) -> bytes:
+    """Sign zip_bytes with ed25519 key from ~/.rkm/keys/{slug}.ed25519 and embed signature."""
+    import io, zipfile
+    key_path = Path.home() / ".rkm" / "keys" / f"{slug}.ed25519"
+    if not key_path.exists():
+        return zip_bytes  # No key — return unsigned
+
+    try:
+        from nacl.signing import SigningKey
+        private_key = SigningKey(bytes.fromhex(key_path.read_text().strip()))
+        sig = private_key.sign(zip_bytes).signature
+
+        # Add signature into the zip
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as src, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                dst.writestr(item, src.read(item.filename))
+            dst.writestr("signature.ed25519", sig)
+        return buf.getvalue()
+    except Exception as exc:
+        print(f"[rkm] Warning: signing failed ({exc}), pushing unsigned", file=sys.stderr)
+        return zip_bytes
+
+
 async def _push_skill(cfg: dict, args: dict) -> dict:
     slug = args["slug"]
     on_conflict = args.get("on_conflict", "replace")
@@ -392,23 +507,64 @@ async def _push_skill(cfg: dict, args: dict) -> dict:
     if not skill_dir.exists():
         return {"error": f"Skill '{slug}' not found in .rkm/skills/"}
 
-    import zipfile, io
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in skill_dir.rglob("*"):
-            if f.name == ".rkm-etag":
-                continue
-            zf.write(f, f.relative_to(skill_dir))
-    buf.seek(0)
+    zip_bytes = _sign_bundle(_pack_skill(skill_dir), slug)
+
+    project_id = cfg.get("project_id")
+    files = {"file": (f"{slug}.skillpack", zip_bytes, "application/zip")}
+    data: dict[str, Any] = {"on_conflict": on_conflict}
+    if project_id is not None:
+        data["project_id"] = str(project_id)
 
     async with _client(cfg) as c:
-        resp = await c.post(
-            f"/api/v1/skills/import?on_conflict={on_conflict}",
-            content=buf.read(),
-            headers={"Content-Type": "application/zip"},
-        )
+        resp = await c.post("/api/v1/skills/import", files=files, data=data)
         resp.raise_for_status()
-    return resp.json()
+    result = resp.json()
+    # Surface approval status clearly for the IDE user
+    if result.get("import_status") == "pending":
+        result["message"] = (
+            f"Push accepted — pending owner approval. "
+            f"Version ID: {result.get('pending_version_id')}. "
+            f"Owner will receive a notification to review at /admin/approvals."
+        )
+    else:
+        result["message"] = f"Push successful — skill '{slug}' is now live."
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Pull repos
+# ---------------------------------------------------------------------------
+
+async def _pull_repos(cfg: dict, args: dict) -> dict:
+    force = args.get("force", False)
+    project_id = cfg.get("project_id")
+    if not project_id:
+        return {"error": "No project_id in config. Run /rkm:login first."}
+
+    etag_cache = _etag_cache()
+    dest = LOCAL_RKM / "repos"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    async with _client(cfg) as c:
+        resp = await c.get(f"/api/v1/projects/{project_id}/repositories")
+        resp.raise_for_status()
+        repos = resp.json()
+
+    pulled, skipped = [], []
+    for repo in repos:
+        key = f"repo:{repo['id']}"
+        etag = str(repo.get("updated_at", repo.get("created_at", "")))
+        if not force and etag_cache.get(key) == etag:
+            skipped.append(repo["name"])
+            continue
+        (dest / f"{repo['name']}.json").write_text(json.dumps(repo, indent=2))
+        etag_cache[key] = etag
+        pulled.append(repo["name"])
+
+    _save_etag_cache(etag_cache)
+    index = [{"id": r["id"], "name": r["name"], "url": r.get("url", "")} for r in repos]
+    (dest / "_index.json").write_text(json.dumps(index, indent=2))
+    return {"pulled": pulled, "skipped_etag_match": skipped, "total": len(repos)}
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +606,119 @@ async def _search_knowledge(cfg: dict, args: dict) -> list:
 async def _get_wiki_page(cfg: dict, args: dict) -> dict:
     async with _client(cfg) as c:
         resp = await c.get(f"/api/v1/wiki/{args['slug']}")
+        resp.raise_for_status()
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Device login
+# ---------------------------------------------------------------------------
+
+async def _login(args: dict) -> dict:
+    """Device authorization flow: opens browser, polls until user approves."""
+    import webbrowser
+
+    platform_url = args["platform_url"].rstrip("/")
+
+    # 1. Start device flow
+    async with httpx.AsyncClient(base_url=platform_url, timeout=15) as c:
+        resp = await c.post("/api/v1/auth/device/start")
+        resp.raise_for_status()
+        device = resp.json()
+
+    device_code = device["device_code"]
+    user_code = device["user_code"]
+    verification_url = device["verification_url"]
+    expires_in = device.get("expires_in", 600)
+
+    print(f"\n[rkm] Opening browser to authorize this device.", file=sys.stderr)
+    print(f"[rkm] If the browser doesn't open, visit: {verification_url}", file=sys.stderr)
+    print(f"[rkm] Enter code: {user_code}\n", file=sys.stderr)
+    webbrowser.open(verification_url)
+
+    # 2. Poll until authorized or expired
+    deadline = time.time() + expires_in
+    async with httpx.AsyncClient(base_url=platform_url, timeout=10) as c:
+        while time.time() < deadline:
+            await asyncio.sleep(5)
+            poll = await c.get("/api/v1/auth/device/poll", params={"device_code": device_code})
+            data = poll.json()
+            status = data.get("status", "pending")
+            if status == "authorized":
+                token = data["token"]
+                break
+            if status == "expired":
+                return {"error": "Device code expired. Run rkm_login again."}
+        else:
+            return {"error": "Login timed out."}
+
+    # 3. Save config
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if CONFIG_PATH.exists():
+        try:
+            existing = json.loads(CONFIG_PATH.read_text())
+        except Exception:
+            pass
+    existing["platform_url"] = platform_url
+    existing["token"] = token
+    CONFIG_PATH.write_text(json.dumps(existing, indent=2))
+
+    return {"status": "logged_in", "platform_url": platform_url, "message": "Credentials saved to ~/.rkm/config.json"}
+
+
+# ---------------------------------------------------------------------------
+# Streaming run + artifact download
+# ---------------------------------------------------------------------------
+
+async def _run_skill_streaming(cfg: dict, args: dict) -> dict:
+    """Subscribe to SSE stream for a run; collect all events; return summary."""
+    import httpx
+    run_id = args["run_id"]
+    base_url = cfg.get("platform_url", "").rstrip("/")
+    token = cfg.get("mcp_token", "")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
+
+    stdout_lines: list[str] = []
+    artifacts: list[dict] = []
+    final_status = "unknown"
+
+    async with httpx.AsyncClient(base_url=base_url, timeout=None) as c:
+        async with c.stream("GET", f"/api/v1/skill-runs/{run_id}/stream", headers=headers) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                raw = line[len("data:"):].strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except Exception:
+                    continue
+                etype = event.get("type", "")
+                if etype == "stdout":
+                    stdout_lines.append(event.get("data", ""))
+                elif etype == "artifact":
+                    artifacts.append({"filename": event.get("filename"), "object_key": event.get("object_key")})
+                elif etype == "complete":
+                    final_status = event.get("status", "complete")
+                    break
+
+    return {
+        "run_id": run_id,
+        "status": final_status,
+        "stdout": "".join(stdout_lines),
+        "artifacts": artifacts,
+    }
+
+
+async def _download_artifact(cfg: dict, args: dict) -> dict:
+    """Return a presigned download URL for a named artifact on a completed run."""
+    run_id = args["run_id"]
+    filename = args["filename"]
+    async with _client(cfg) as c:
+        resp = await c.get(f"/api/v1/skill-runs/{run_id}/artifacts/{filename}/url")
         resp.raise_for_status()
     return resp.json()
 
