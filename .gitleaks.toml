@@ -1,0 +1,5 @@
+[allowlist]
+  description = "Allowlist for SECURITY-INCIDENT.md (documents revoked/dead credentials)"
+  paths = [
+    "SECURITY-INCIDENT.md"
+  ]
