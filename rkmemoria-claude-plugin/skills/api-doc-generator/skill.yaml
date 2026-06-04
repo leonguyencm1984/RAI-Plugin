@@ -15,7 +15,7 @@ source_wiki_page_slugs: []
 variables:
   - name: BASE_URL
     description: Backend server base URL
-    default: http://localhost:8080
+    default: http://localhost:8081
     required: true
     secret: false
   - name: AUTH_TOKEN
