@@ -257,6 +257,17 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await _get_wiki_page(cfg, arguments)
         else:
             result = {"error": f"Unknown tool: {name}"}
+    except httpx.HTTPStatusError as exc:
+        # Preserve HTTP status so callers can distinguish 401/403/404/422
+        try:
+            detail = exc.response.json()
+        except Exception:
+            detail = exc.response.text
+        result = {
+            "error": f"HTTP {exc.response.status_code}",
+            "status_code": exc.response.status_code,
+            "detail": detail,
+        }
     except Exception as exc:
         result = {"error": str(exc)}
     return [types.TextContent(type="text", text=json.dumps(result, default=str))]

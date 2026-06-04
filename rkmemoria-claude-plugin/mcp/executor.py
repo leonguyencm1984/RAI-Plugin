@@ -96,7 +96,7 @@ def execute(slug: str, input_json: str, timeout: int = 60) -> dict:
     run_log: dict = {"slug": slug, "runtime": runtime, "input": input_json}
 
     if runtime == "script":
-        entry = skill_dir / "scripts" / manifest.get("script", {}).get("entry_point", "run.py").lstrip("scripts/")
+        entry = skill_dir / "scripts" / manifest.get("script", {}).get("entry_point", "run.py").removeprefix("scripts/")
         output = _run_script(entry, venv, input_json, script_timeout)
         run_log["output"] = output
         run_log["duration_ms"] = int((time.time() - start) * 1000)
