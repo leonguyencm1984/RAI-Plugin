@@ -122,9 +122,19 @@ class Config:
         self.base_url = os.getenv("BASE_URL", "http://localhost:8080").rstrip("/")
         self.auth_token = os.getenv("AUTH_TOKEN", "")
         self.auth_username = os.getenv("AUTH_USERNAME", "3")
-        self.auth_password = os.getenv("AUTH_PASSWORD", "Aaaa2222")
+        _auth_password = os.getenv("AUTH_PASSWORD")
+        if not _auth_password:
+            raise ValueError(
+                "AUTH_PASSWORD env var is required — set it in scripts/.env before running"
+            )
+        self.auth_password = _auth_password
         self.login_endpoint = os.getenv("LOGIN_ENDPOINT", "/user/login")
-        self.aes_key = os.getenv("AES_KEY", "01234hyxvue56789")
+        _aes_key = os.getenv("AES_KEY")
+        if not _aes_key:
+            raise ValueError(
+                "AES_KEY env var is required — set it in scripts/.env before running"
+            )
+        self.aes_key = _aes_key
         self.timeout = int(os.getenv("TIMEOUT", "15"))
         self.verify_ssl = os.getenv("VERIFY_SSL", "false").lower() == "true"
         self.docs_dir = os.getenv("DOCS_DIR", "../documents")

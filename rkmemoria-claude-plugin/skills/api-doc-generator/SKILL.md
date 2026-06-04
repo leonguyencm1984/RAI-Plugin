@@ -168,9 +168,9 @@ All paths relative to `/Users/nguyendt/SanyuAdelie/`.
 | `BASE_URL`         | Backend server URL for live verification         | `http://localhost:8080`    |
 | `AUTH_TOKEN`       | Pre-set auth token (empty = use login flow)      | *(empty)*                  |
 | `AUTH_USERNAME`    | Login username for authentication                | `3`                        |
-| `AUTH_PASSWORD`    | Login password for authentication                | `Aaaa2222`                 |
+| `AUTH_PASSWORD`    | Login password for authentication                | *(required — set in `scripts/.env`, never committed)* |
 | `LOGIN_ENDPOINT`  | Login API path                                   | `/user/login`              |
-| `AES_KEY`         | AES encryption key for password encryption       | `01234hyxvue56789`         |
+| `AES_KEY`         | AES encryption key for password encryption       | *(required — set in `scripts/.env`, never committed)* |
 | `TIMEOUT`         | Request timeout in seconds per endpoint          | `180`                      |
 | `VERIFY_SSL`      | Whether to verify SSL certificates               | `false`                    |
 | `DOCS_DIR`        | Directory for generated API docs (relative to `scripts/`) | `../documents`    |

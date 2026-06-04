@@ -1,0 +1,30 @@
+# Credentials and secrets
+credential.md
+.env
+*/.env
+**/.env
+*.env
+~/.rkm/
+.rkm/
+
+# Keys
+*.key
+*.pem
+*.p12
+*.ed25519
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
