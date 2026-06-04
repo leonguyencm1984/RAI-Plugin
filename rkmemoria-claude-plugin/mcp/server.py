@@ -676,7 +676,7 @@ async def _run_skill_streaming(cfg: dict, args: dict) -> dict:
     import httpx
     run_id = args["run_id"]
     base_url = cfg.get("platform_url", "").rstrip("/")
-    token = cfg.get("mcp_token", "")
+    token = cfg.get("token", "")
     headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
 
     stdout_lines: list[str] = []
