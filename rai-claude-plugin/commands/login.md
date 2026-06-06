@@ -1,6 +1,6 @@
 # /rai:login
 
-Log in to your RKMemoria platform instance.
+Log in to your RAI Platform instance.
 
 ## Steps
 

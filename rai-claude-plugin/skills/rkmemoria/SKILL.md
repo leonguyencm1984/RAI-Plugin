@@ -1,10 +1,10 @@
-# RKMemoria Plugin Guide
+# RAI Platform Plugin Guide
 
-You are working in a project directory that has the RKMemoria Claude Code plugin installed.
+You are working in a project directory that has the RAI Platform Claude Code plugin installed.
 
 ## What the plugin provides
 
-- **`/rai:login`** — Connect to your RKMemoria platform (one-time setup per machine)
+- **`/rai:login`** — Connect to your RAI Platform instance (one-time setup per machine)
 - **`/rai:status`** — See what's pulled locally vs available on the platform
 - **`/rai:pull`** — Interactive picker: pull workflows, skills, or knowledge base
 - **`/rai:pull-skills`**, **`/rai:pull-workflows`**, **`/rai:pull-kb`**, **`/rai:pull-repos`** — Scriptable per-category pull

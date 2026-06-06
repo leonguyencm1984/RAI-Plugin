@@ -1,6 +1,6 @@
 # RAI Claude Code Plugin
 
-Brings your RAI / RKMemoria knowledge base, skills, workflows, and code graph into Claude Code.
+Brings your RAI Platform knowledge base, skills, workflows, and code graph into Claude Code.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ Brings your RAI / RKMemoria knowledge base, skills, workflows, and code graph in
 Register the plugin as a local marketplace and install it:
 
 ```
-/plugin marketplace add <path-to-rkmemoria-claude-plugin>
+/plugin marketplace add <path-to-rai-claude-plugin>
 /plugin install rai@rai
 ```
 
