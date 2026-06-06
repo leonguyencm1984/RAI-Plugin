@@ -454,61 +454,8 @@ async def _pull_kb(cfg: dict, args: dict) -> dict:
 # Push skill
 # ---------------------------------------------------------------------------
 
-def _load_ignore_patterns(skill_dir: Path) -> list[str]:
-    """Read .rkmpackignore from the skill directory and return glob patterns."""
-    ignore_file = skill_dir / ".rkmpackignore"
-    if not ignore_file.exists():
-        return []
-    lines = ignore_file.read_text().splitlines()
-    return [l.strip() for l in lines if l.strip() and not l.startswith("#")]
-
-
-def _should_ignore(rel_path: str, patterns: list[str]) -> bool:
-    import fnmatch
-    return any(fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(Path(rel_path).name, p) for p in patterns)
-
-
-def _pack_skill(skill_dir: Path) -> bytes:
-    """Build a zip from the skill directory, honoring .rkmpackignore."""
-    import io, zipfile
-    patterns = _load_ignore_patterns(skill_dir)
-    always_skip = {".rkm-etag", ".rkmpackignore"}
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in sorted(skill_dir.rglob("*")):
-            if not f.is_file():
-                continue
-            rel = str(f.relative_to(skill_dir))
-            if f.name in always_skip:
-                continue
-            if _should_ignore(rel, patterns):
-                continue
-            zf.write(f, rel)
-    return buf.getvalue()
-
-
-def _sign_bundle(zip_bytes: bytes, slug: str) -> bytes:
-    """Sign zip_bytes with ed25519 key from ~/.rkm/keys/{slug}.ed25519 and embed signature."""
-    import io, zipfile
-    key_path = Path.home() / ".rkm" / "keys" / f"{slug}.ed25519"
-    if not key_path.exists():
-        return zip_bytes  # No key — return unsigned
-
-    try:
-        from nacl.signing import SigningKey
-        private_key = SigningKey(bytes.fromhex(key_path.read_text().strip()))
-        sig = private_key.sign(zip_bytes).signature
-
-        # Add signature into the zip
-        buf = io.BytesIO()
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as src, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
-            for item in src.infolist():
-                dst.writestr(item, src.read(item.filename))
-            dst.writestr("signature.ed25519", sig)
-        return buf.getvalue()
-    except Exception as exc:
-        print(f"[rkm] Warning: signing failed ({exc}), pushing unsigned", file=sys.stderr)
-        return zip_bytes
+# Pack/sign helpers live in skill_packager.py (shared with /rai:build-skill CLI).
+from skill_packager import _pack_skill, _sign_bundle  # noqa: E402
 
 
 async def _push_skill(cfg: dict, args: dict) -> dict:

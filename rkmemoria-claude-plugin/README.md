@@ -39,12 +39,34 @@ Then restart Claude Code so the commands register.
 | `/rai:pull-skills`    | Pull skill bundles (scriptable)       |
 | `/rai:pull-repos`     | Clone repositories (scriptable)       |
 | `/rai:pull-kb`        | Pull wiki + sources (scriptable)      |
+| `/rai:build-skill`    | Build a `.rai` archive from a SKILL.md |
 | `/rai:push-skill`     | Push local skill edits back           |
 | `/rai:run-skill`      | Execute a script/hybrid skill locally |
 | `/rai:list-workflows` | List available workflows              |
 | `/rai:run-workflow`   | Run a workflow by ID                  |
 
 ## Building a skill bundle (.skillpack)
+
+A `.skillpack` / `.rai` file is a zip archive that you upload to the platform to create or update a skill.
+
+### Quick build with the plugin command
+
+The easiest way is the `/rai:build-skill` command — point it at a `SKILL.md` and it
+produces a `<slug>.rai` archive in one step:
+
+```
+/rai:build-skill skills/my-skill/SKILL.md
+# → builds my-skill.rai next to the skills/ directory
+# → auto-generates skill.yaml from SKILL.md frontmatter if none exists
+# → warns if credentials or sensitive files are detected
+```
+
+Pass `--runtime script` for script-runtime skills, `--output <path>` to control the
+destination, or `--force-yaml` to regenerate `skill.yaml` from frontmatter.
+
+The manual steps below are still useful when you need full control.
+
+---
 
 A `.skillpack` is a renamed `.zip` file that you upload to the platform to create or update a skill.
 
