@@ -11,8 +11,10 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,8 @@ from mcp.server.stdio import stdio_server
 
 CONFIG_PATH = Path.home() / ".rkm" / "config.json"
 LOCAL_RKM = Path.cwd() / ".rkm"
+
+DEFAULT_PLATFORM_URL: str = os.environ.get("RAI_PLATFORM_URL", "http://localhost:8001")
 
 
 def _load_config() -> dict:
@@ -46,9 +50,59 @@ def _save_etag_cache(cache: dict) -> None:
     (LOCAL_RKM / ".etag-cache.json").write_text(json.dumps(cache, indent=2))
 
 
+# Project-level config (.rkm/config.json) — stores platform_url, project_id,
+# and the optional kb_dir override. Never stores the token (lives in ~/.rkm/).
+PROJECT_CONFIG_PATH = LOCAL_RKM / "config.json"
+
+
+def _load_project_config() -> dict:
+    return json.loads(PROJECT_CONFIG_PATH.read_text()) if PROJECT_CONFIG_PATH.exists() else {}
+
+
+def _save_project_config(data: dict) -> None:
+    LOCAL_RKM.mkdir(parents=True, exist_ok=True)
+    PROJECT_CONFIG_PATH.write_text(json.dumps(data, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Scope-aware path helpers
+# Layout:
+#   .rkm/org/                     — org-wide resources (skills, kb)
+#   .rkm/projects/<slug>/         — per-project resources (skills, workflows, kb, repos)
+# ---------------------------------------------------------------------------
+
+def _project_slug(cfg: dict) -> str:
+    """Return the project slug from config, falling back to 'project-<id>'."""
+    return cfg.get("project_slug") or f"project-{cfg.get('project_id', 'unknown')}"
+
+
+def _org_dir() -> Path:
+    return LOCAL_RKM / "org"
+
+
+def _project_dir(cfg: dict) -> Path:
+    return LOCAL_RKM / "projects" / _project_slug(cfg)
+
+
+def _kb_dir(base=None) -> Path:
+    """KB root under a given scope base directory.
+
+    When base is provided (scoped pull callers), returns base/kb.
+    When base is None (legacy: _push_kb, _set_kb, _ingest, _rkm_status),
+    falls back to the project config `kb_dir` override or .rkm/kb.
+    """
+    if base is not None:
+        return base / "kb"
+    raw = _load_project_config().get("kb_dir")
+    if raw:
+        p = Path(raw).expanduser()
+        return p if p.is_absolute() else (Path.cwd() / p)
+    return LOCAL_RKM / "kb"
+
+
 def _client(cfg: dict) -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        base_url=cfg["platform_url"],
+        base_url=cfg.get("platform_url") or DEFAULT_PLATFORM_URL,
         headers={"Authorization": f"Bearer {cfg['token']}"},
         timeout=30,
     )
@@ -70,9 +124,9 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "platform_url": {"type": "string", "description": "Platform base URL, e.g. http://localhost:8001"},
+                    "platform_url": {"type": "string", "description": "Platform base URL (default: http://localhost:8001)"},
                 },
-                "required": ["platform_url"],
+                "required": [],
             },
         ),
         types.Tool(
@@ -82,7 +136,10 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="rkm_pull_workflows",
-            description="Pull workflows from the platform to .rkm/workflows/",
+            description=(
+                "Pull workflows from the platform to .rkm/projects/<slug>/workflows/. "
+                "Workflows are always project-scoped; scope='org' is ignored."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -94,7 +151,12 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="rkm_pull_skills",
-            description="Pull skill bundles from the platform to .rkm/skills/",
+            description=(
+                "Pull skill bundles from the platform. "
+                "Org-level skills (project_id=null) go to .rkm/org/skills/; "
+                "project-level skills go to .rkm/projects/<slug>/skills/. "
+                "scope: 'org'=org-only, 'project'=project-only, 'both'=all (default)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -102,12 +164,18 @@ async def list_tools() -> list[types.Tool]:
                     "slugs": {"type": "array", "items": {"type": "string"}},
                     "tag": {"type": "string"},
                     "force": {"type": "boolean", "default": False},
+                    "scope": {"type": "string", "enum": ["org", "project", "both"], "default": "both"},
                 },
             },
         ),
         types.Tool(
             name="rkm_pull_kb",
-            description="Pull knowledge base (sources + wiki pages) to .rkm/kb/",
+            description=(
+                "Pull knowledge base from the platform. "
+                "Org-visibility items go to .rkm/org/kb/; "
+                "project-visibility items go to .rkm/projects/<slug>/kb/. "
+                "scope: 'org'=org-only, 'project'=project-only, 'both'=all (default)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -115,6 +183,7 @@ async def list_tools() -> list[types.Tool]:
                     "wiki_only": {"type": "boolean", "default": False},
                     "sources_only": {"type": "boolean", "default": False},
                     "force": {"type": "boolean", "default": False},
+                    "scope": {"type": "string", "enum": ["org", "project", "both"], "default": "both"},
                 },
             },
         ),
@@ -126,17 +195,52 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "slug": {"type": "string", "description": "Skill slug (folder name under .rkm/skills/)"},
                     "on_conflict": {"type": "string", "enum": ["replace", "rename", "skip"], "default": "replace"},
+                    "scope": {"type": "string", "enum": ["org", "project"], "description": "Scope to search for skill dir (default: org-then-project fallback)"},
                 },
                 "required": ["slug"],
             },
         ),
         types.Tool(
+            name="rkm_push_workflows",
+            description=(
+                "Push local workflow JSON files from .rkm/projects/<slug>/workflows/ back to the platform. "
+                "Remaps skill slugs to current environment skill IDs. Workflows are project-scoped only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "all": {"type": "boolean", "default": False},
+                    "slugs": {"type": "array", "items": {"type": "string"}, "description": "Specific workflow slugs to push (omit or use all:true for all)"},
+                    "force": {"type": "boolean", "default": False},
+                },
+            },
+        ),
+        types.Tool(
             name="rkm_pull_repos",
-            description="Pull repository metadata for the current project to .rkm/repos/",
+            description="Pull repository metadata for the current project to .rkm/projects/<slug>/repos/",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "force": {"type": "boolean", "default": False},
+                },
+            },
+        ),
+        types.Tool(
+            name="rkm_list_skills",
+            description=(
+                "List available skills (org and/or project) without downloading bundles. "
+                "Use this to browse skill names/slugs/tags before deciding which org skills to pull. "
+                "Returns {\"org\": [...], \"project\": [...]} each containing {slug, name, tags, runtime, project_id, updated_at}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["org", "project", "both"],
+                        "default": "both",
+                    },
                 },
             },
         ),
@@ -210,6 +314,59 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["slug"],
             },
         ),
+        types.Tool(
+            name="rkm_ingest",
+            description=(
+                "Extract text from a local source (file, folder, zip, URL, or raw text) "
+                "and save it to .rkm/kb/sources/. Returns the extracted raw_text so the "
+                "agent can generate wiki pages. Supported file types: "
+                ".txt .md .pdf .docx .xlsx .xls .csv; folders and .zip archives."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Human-readable title for this source"},
+                    "text": {"type": "string", "description": "Raw text to ingest directly"},
+                    "url": {"type": "string", "description": "URL to fetch and extract"},
+                    "file": {"type": "string", "description": "Absolute path to a local file"},
+                    "folder": {"type": "string", "description": "Absolute path to a local directory or .zip archive"},
+                    "project_id": {"type": "integer", "description": "Project ID (defaults to config project_id)"},
+                    "knowledge_type_id": {"type": "integer"},
+                },
+                "required": ["title"],
+            },
+        ),
+        types.Tool(
+            name="rkm_push_kb",
+            description=(
+                "Push local knowledge base to the platform. "
+                "Reads from .rkm/org/kb/ (scope='org'), .rkm/projects/<slug>/kb/ (scope='project'), "
+                "or both (default). Uploads sources and wiki pages; skips unchanged via etag cache."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "wiki_only": {"type": "boolean", "default": False},
+                    "sources_only": {"type": "boolean", "default": False},
+                    "force": {"type": "boolean", "default": False},
+                    "scope": {"type": "string", "enum": ["org", "project", "both"], "default": "both"},
+                },
+            },
+        ),
+        types.Tool(
+            name="rkm_set_kb",
+            description=(
+                "Set the local knowledge-base folder (persisted in project .rkm/config.json). "
+                "Default is .rkm/kb. Pass clear=true to reset to the default."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "Folder to use as KB root (absolute, or relative to project root)"},
+                    "clear": {"type": "boolean", "default": False, "description": "Reset to the default .rkm/kb"},
+                },
+            },
+        ),
     ]
 
 
@@ -219,10 +376,17 @@ async def list_tools() -> list[types.Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    # Login does not require existing config
+    # Local-only tools that do not require existing config
     if name == "rkm_login":
         try:
             result = await _login(arguments)
+        except Exception as exc:
+            result = {"error": str(exc)}
+        return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+    if name == "rkm_set_kb":
+        try:
+            result = _set_kb(arguments)
         except Exception as exc:
             result = {"error": str(exc)}
         return [types.TextContent(type="text", text=json.dumps(result, default=str))]
@@ -241,6 +405,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await _push_skill(cfg, arguments)
         elif name == "rkm_pull_repos":
             result = await _pull_repos(cfg, arguments)
+        elif name == "rkm_list_skills":
+            result = await _list_skills(cfg, arguments)
         elif name == "rkm_list_workflows":
             result = await _list_workflows(cfg)
         elif name == "rkm_run_workflow":
@@ -255,6 +421,12 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await _search_knowledge(cfg, arguments)
         elif name == "get_wiki_page":
             result = await _get_wiki_page(cfg, arguments)
+        elif name == "rkm_ingest":
+            result = await _ingest(cfg, arguments)
+        elif name == "rkm_push_kb":
+            result = await _push_kb(cfg, arguments)
+        elif name == "rkm_push_workflows":
+            result = await _push_workflows(cfg, arguments)
         else:
             result = {"error": f"Unknown tool: {name}"}
     except httpx.HTTPStatusError as exc:
@@ -280,24 +452,55 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 async def _rkm_status(cfg: dict) -> dict:
     async with _client(cfg) as c:
         project_id = cfg.get("project_id")
-        manifest_resp = await c.get(f"/api/v1/projects/{project_id}/manifest")
-        manifest_resp.raise_for_status()
-        manifest = manifest_resp.json()
+        if project_id is not None:
+            manifest_resp = await c.get(f"/api/v1/projects/{project_id}/manifest")
+            manifest_resp.raise_for_status()
+            manifest = manifest_resp.json()
+        else:
+            manifest = {"workflows_count": None, "skills_count": None, "repos_count": None, "sources_count": None, "wiki_count": None}
 
     etag_cache = _etag_cache()
-    pulled_workflows = len(list((LOCAL_RKM / "workflows").glob("*.json"))) if (LOCAL_RKM / "workflows").exists() else 0
-    pulled_skills = len(list((LOCAL_RKM / "skills").iterdir())) if (LOCAL_RKM / "skills").exists() else 0
-    pulled_wiki = len(list((LOCAL_RKM / "kb" / "wiki").glob("*.md"))) if (LOCAL_RKM / "kb" / "wiki").exists() else 0
-    pulled_sources = len(list((LOCAL_RKM / "kb" / "sources").glob("*.json"))) if (LOCAL_RKM / "kb" / "sources").exists() else 0
+    org = _org_dir()
+    proj = _project_dir(cfg)
+
+    def _count(path, pattern):
+        return len(list(path.glob(pattern))) if path.exists() else 0
+
+    def _count_dirs(path):
+        return len([p for p in path.iterdir() if p.is_dir()]) if path.exists() else 0
+
+    pulled_skills_org = _count_dirs(org / "skills")
+    pulled_skills_proj = _count_dirs(proj / "skills")
+    pulled_workflows = _count(proj / "workflows", "*.json")
+    pulled_wiki_org = _count(org / "kb" / "wiki", "*.md")
+    pulled_wiki_proj = _count(proj / "kb" / "wiki", "*.md")
+    pulled_sources_org = _count(org / "kb" / "sources", "*.json")
+    pulled_sources_proj = _count(proj / "kb" / "sources", "*.json")
 
     return {
-        "platform": cfg["platform_url"],
+        "platform": cfg.get("platform_url") or DEFAULT_PLATFORM_URL,
+        "project": _project_slug(cfg),
         "project_id": project_id,
         "workflows": {"pulled": pulled_workflows, "available": manifest["workflows_count"]},
-        "skills": {"pulled": pulled_skills, "available": manifest["skills_count"]},
+        "skills": {
+            "pulled": pulled_skills_org + pulled_skills_proj,
+            "org": pulled_skills_org,
+            "project": pulled_skills_proj,
+            "available": manifest["skills_count"],
+        },
         "repos": {"available": manifest["repos_count"]},
-        "sources": {"pulled": pulled_sources, "available": manifest["sources_count"]},
-        "wiki": {"pulled": pulled_wiki, "available": manifest["wiki_count"]},
+        "sources": {
+            "pulled": pulled_sources_org + pulled_sources_proj,
+            "org": pulled_sources_org,
+            "project": pulled_sources_proj,
+            "available": manifest["sources_count"],
+        },
+        "wiki": {
+            "pulled": pulled_wiki_org + pulled_wiki_proj,
+            "org": pulled_wiki_org,
+            "project": pulled_wiki_proj,
+            "available": manifest["wiki_count"],
+        },
         "etag_entries": len(etag_cache),
     }
 
@@ -307,9 +510,13 @@ async def _rkm_status(cfg: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _pull_workflows(cfg: dict, args: dict) -> dict:
+    # Workflows are always project-scoped; org scope is not applicable.
+    if args.get("scope") == "org":
+        return {"pulled": [], "skipped_etag_match": [], "note": "Workflows are project-scoped only; org scope skipped."}
+
     force = args.get("force", False)
     etag_cache = _etag_cache()
-    dest = LOCAL_RKM / "workflows"
+    dest = _project_dir(cfg) / "workflows"
     dest.mkdir(parents=True, exist_ok=True)
 
     async with _client(cfg) as c:
@@ -343,10 +550,10 @@ async def _pull_workflows(cfg: dict, args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _pull_skills(cfg: dict, args: dict) -> dict:
+    import zipfile, io as _io
     force = args.get("force", False)
+    scope = args.get("scope", "both")  # "org" | "project" | "both"
     etag_cache = _etag_cache()
-    dest = LOCAL_RKM / "skills"
-    dest.mkdir(parents=True, exist_ok=True)
 
     async with _client(cfg) as c:
         resp = await c.get("/api/v1/skills/", params={"limit": 100})
@@ -361,90 +568,491 @@ async def _pull_skills(cfg: dict, args: dict) -> dict:
             tag = args["tag"]
             skills = [s for s in skills if tag in (s.get("tags") or [])]
 
+    # Partition by scope: project_id=None → org-level, else project-level
+    org_skills = [s for s in skills if s.get("project_id") is None]
+    project_skills = [s for s in skills if s.get("project_id") is not None]
+
+    buckets = []
+    if scope in ("org", "both"):
+        buckets.append((_org_dir() / "skills", org_skills))
+    if scope in ("project", "both"):
+        buckets.append((_project_dir(cfg) / "skills", project_skills))
+
     pulled, skipped, conflicts = [], [], []
-    for skill in skills:
-        slug = skill["slug"]
-        key = f"skill:{slug}"
-        etag = str(skill.get("updated_at", ""))
-        skill_dir = dest / slug
+    for dest, bucket in buckets:
+        dest.mkdir(parents=True, exist_ok=True)
+        for skill in bucket:
+            slug = skill["slug"]
+            key = f"skill:{slug}"
+            etag = str(skill.get("updated_at", ""))
+            skill_dir = dest / slug
 
-        if not force and etag_cache.get(key) == etag:
-            skipped.append(slug)
-            continue
-
-        # Check for local edits by comparing stored hash
-        if skill_dir.exists() and not force:
-            marker = skill_dir / ".rkm-etag"
-            if marker.exists() and marker.read_text() != etag:
-                conflicts.append(slug)
+            if not force and etag_cache.get(key) == etag:
+                skipped.append(slug)
                 continue
 
-        async with _client(cfg) as c:
-            bundle_resp = await c.get(f"/api/v1/skills/{slug}/bundle")
-            if bundle_resp.status_code == 200:
-                import zipfile, io
-                skill_dir.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(io.BytesIO(bundle_resp.content)) as zf:
-                    zf.extractall(skill_dir)
-                (skill_dir / ".rkm-etag").write_text(etag)
-                etag_cache[key] = etag
-                pulled.append(slug)
-            else:
-                conflicts.append(slug)
+            # Check for local edits by comparing stored marker
+            if skill_dir.exists() and not force:
+                marker = skill_dir / ".rkm-etag"
+                if marker.exists() and marker.read_text() != etag:
+                    conflicts.append(slug)
+                    continue
+
+            async with _client(cfg) as c:
+                bundle_resp = await c.get(f"/api/v1/skills/{slug}/bundle")
+                if bundle_resp.status_code == 200:
+                    skill_dir.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(_io.BytesIO(bundle_resp.content)) as zf:
+                        zf.extractall(skill_dir)
+                    (skill_dir / ".rkm-etag").write_text(etag)
+                    etag_cache[key] = etag
+                    pulled.append(slug)
+                else:
+                    conflicts.append(slug)
+
+        # Write scoped index
+        index = [{"slug": s["slug"], "name": s["name"], "runtime": s.get("runtime", "prompt")} for s in bucket]
+        (dest / "_index.json").write_text(json.dumps(index, indent=2))
+
+    # Regenerate scope INDEXes so skills appear in the Obsidian graph.
+    # Uses disk-fallback (all_pages=None) — no wiki re-fetch needed.
+    for dest, _bucket in buckets:
+        scope_dir = dest.parent  # dest = <scope>/skills → parent is org/ or projects/<slug>/
+        label = "Org" if scope_dir == _org_dir() else _project_slug(cfg)
+        _write_scope_index(None, scope_dir, label)
+    if buckets:
+        _write_root_index()
 
     _save_etag_cache(etag_cache)
-    index = [{"slug": s["slug"], "name": s["name"], "runtime": s.get("runtime", "prompt")} for s in skills]
-    (dest / "_index.json").write_text(json.dumps(index, indent=2))
-    return {"pulled": pulled, "skipped_etag_match": skipped, "conflicts": conflicts}
+    return {
+        "pulled": pulled,
+        "skipped_etag_match": skipped,
+        "conflicts": conflicts,
+        "org_skills": len(org_skills),
+        "project_skills": len(project_skills),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pull KB — helpers
+# ---------------------------------------------------------------------------
+
+def _extract_items(resp_data: Any) -> list:
+    """Extract the items list from a paginated or plain-list API response."""
+    if isinstance(resp_data, dict) and "items" in resp_data:
+        return resp_data["items"]
+    return resp_data  # legacy bare-list fallback
+
+
+def _wiki_frontmatter(page: dict) -> str:
+    """Render YAML frontmatter for an Obsidian note from a WikiPageResponse dict."""
+    def _esc(v: str) -> str:
+        return str(v).replace('"', '\\"')
+
+    source_ids = page.get("source_ids") or []
+    source_ids_str = "[" + ", ".join(str(i) for i in source_ids) + "]"
+    lines = [
+        "---",
+        f'title: "{_esc(page.get("title", ""))}"',
+        f'slug: {page.get("slug", "")}',
+        f'summary: "{_esc(page.get("summary", ""))}"',
+        f'project_id: {page.get("project_id")}',
+        f'knowledge_type_id: {page.get("knowledge_type_id")}',
+        f'version: {page.get("version", 1)}',
+        f'created: {page.get("created_at", "")}',
+        f'updated: {page.get("updated_at", "")}',
+        f'source_ids: {source_ids_str}',
+        "tags: [rkmemoria, wiki]",
+        "---",
+    ]
+    return "\n".join(lines)
+
+
+def _ensure_vault_obsidian() -> None:
+    """Create .rkm/.obsidian/app.json once — single vault root for Obsidian."""
+    obsidian_dir = LOCAL_RKM / ".obsidian"
+    obsidian_dir.mkdir(parents=True, exist_ok=True)
+    app_json = obsidian_dir / "app.json"
+    if not app_json.exists():
+        app_json.write_text(json.dumps({"alwaysUpdateLinks": True}, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Pull KB — cross-linking helpers
+# ---------------------------------------------------------------------------
+
+def _screen_code(slug: str) -> "str | None":
+    """Extract the screen code prefix from a slug (e.g. 'm002', 'p001-2', 'pxxx').
+
+    Returns None for non-screen pages (org index pages, ute-meta pages, etc.).
+    """
+    m = re.match(r'^([mpr](?:xxx|20x|\d{3})(?:-\d+)*)', slug)
+    return m.group(1) if m else None
+
+
+def _build_link_index(pages: list) -> dict:
+    """Build a link-resolution index for a set of wiki pages.
+
+    Returns:
+    - by_code:     screen_code -> {"design": [slug...], "ut": [slug...]}
+    - slugs:       set of all real slugs in this scope
+    - title_of:    slug -> title
+    - alias_table: short broken slug -> real slug (static)
+    """
+    by_code: dict = {}
+    slugs: set = set()
+    title_of: dict = {}
+
+    for page in pages:
+        slug = page.get("slug", "")
+        title = page.get("title", "")
+        slugs.add(slug)
+        title_of[slug] = title
+
+        code = _screen_code(slug)
+        if code is None:
+            continue
+        bucket = by_code.setdefault(code, {"design": [], "ut": []})
+        bucket["ut" if slug.endswith("-unit-tests") else "design"].append(slug)
+
+    alias_table: dict = {
+        "ute-overview": "sanyu-adelie-ute-overview-unit-test-specifications",
+        "ute-testcase-translation": "ute-testcase-translation-management",
+    }
+
+    return {"by_code": by_code, "slugs": slugs, "title_of": title_of, "alias_table": alias_table}
+
+
+def _related_section(slug: str, index: dict) -> str:
+    """Return a '## Related' section linking design<->UTE counterparts, or '' if none."""
+    code = _screen_code(slug)
+    if not code:
+        return ""
+    by_code = index["by_code"]
+    if code not in by_code:
+        return ""
+    title_of = index["title_of"]
+    is_ut = slug.endswith("-unit-tests")
+    partners = by_code[code]["design" if is_ut else "ut"]
+    if not partners:
+        return ""
+    label = "Detail Design" if is_ut else "Unit Tests"
+    link_lines = "\n".join(
+        f"- **{label}:** [[{ps}|{title_of.get(ps, ps)}]]"
+        for ps in sorted(partners)
+    )
+    return f"\n\n---\n\n## Related\n\n{link_lines}\n"
+
+
+def _resolve_wikilinks(body: str, index: dict) -> str:
+    """Repair broken wikilinks by mapping short/canonical slugs to real filenames.
+
+    Targets that cannot be resolved unambiguously are left untouched (safe no-op).
+    """
+    slugs = index["slugs"]
+    alias_table = index["alias_table"]
+    by_code = index["by_code"]
+    pattern = re.compile(r'\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]')
+
+    def _fix(m: "re.Match") -> str:
+        target = m.group(1).strip()
+        orig_alias = m.group(2)
+
+        if target in slugs:
+            return m.group(0)  # already resolves
+
+        if target in alias_table:
+            real = alias_table[target]
+            return f"[[{real}|{orig_alias or target}]]"
+
+        lookup = target[4:] if target.startswith("ute-") else target
+        code = _screen_code(lookup)
+        if not code or code not in by_code:
+            return m.group(0)
+
+        is_ut_target = target.endswith("-unit-tests") or target.startswith("ute-")
+        candidates = by_code[code]["ut" if is_ut_target else "design"]
+        if not candidates:
+            candidates = by_code[code]["design" if is_ut_target else "ut"]
+        if len(candidates) == 1:
+            real = candidates[0]
+            return f"[[{real}|{orig_alias or target}]]"
+        return m.group(0)  # ambiguous — leave untouched
+
+    return pattern.sub(_fix, body)
+
+
+def _read_skills_index(scope_dir: "Path") -> list:
+    """Load scope_dir/skills/_index.json, returning [] if absent or unreadable."""
+    index_path = scope_dir / "skills" / "_index.json"
+    if not index_path.exists():
+        return []
+    try:
+        return json.loads(index_path.read_text())
+    except Exception:
+        return []
+
+
+def _read_wiki_pages_on_disk(wiki_dir: "Path") -> list:
+    """Parse frontmatter from wiki .md files (written by _wiki_frontmatter) to
+    reconstruct minimal page metadata: {slug, title, knowledge_type_id}.
+    Used as a fallback when _write_scope_index is called without live page data
+    (e.g. during a skills-only pull).
+    """
+    pages = []
+    if not wiki_dir.exists():
+        return pages
+    for md_file in sorted(wiki_dir.glob("*.md")):
+        if md_file.name == "INDEX.md":
+            continue
+        try:
+            text = md_file.read_text()
+        except OSError:
+            continue
+        fm_match = re.match(r'^---\n(.*?)\n---', text, re.DOTALL)
+        if not fm_match:
+            continue
+        fm = fm_match.group(1)
+        slug_m = re.search(r'^slug:\s*(.+)$', fm, re.MULTILINE)
+        title_m = re.search(r'^title:\s*"?(.*?)"?$', fm, re.MULTILINE)
+        kt_m = re.search(r'^knowledge_type_id:\s*(.+)$', fm, re.MULTILINE)
+        if not slug_m:
+            continue
+        slug = slug_m.group(1).strip()
+        title = title_m.group(1).strip() if title_m else slug
+        kt_raw = kt_m.group(1).strip() if kt_m else None
+        kt = None
+        if kt_raw and kt_raw not in ("None", "null", ""):
+            try:
+                kt = int(kt_raw)
+            except ValueError:
+                kt = kt_raw
+        pages.append({"slug": slug, "title": title, "knowledge_type_id": kt})
+    return pages
+
+
+def _skills_section_lines(scope_dir: "Path") -> list:
+    """Return markdown lines for a '## Skills' section, or [] if the scope has none."""
+    skills = _read_skills_index(scope_dir)
+    if not skills:
+        return []
+    try:
+        rel_prefix = scope_dir.relative_to(LOCAL_RKM)
+    except ValueError:
+        rel_prefix = scope_dir.name
+    result = ["## Skills", ""]
+    for s in sorted(skills, key=lambda x: x.get("name", "")):
+        slug = s["slug"]
+        name = s.get("name", slug)
+        result.append(f"- [[{rel_prefix}/skills/{slug}/SKILL|{name}]]")
+    result.append("")
+    return result
+
+
+def _write_scope_index(all_pages, scope_dir: "Path", scope_label: str) -> None:
+    """Write an INDEX.md (Map of Content) into a scope directory (org/ or projects/<slug>/).
+
+    all_pages: list of wiki page dicts, or None to load from disk (skills-only pull fallback).
+    """
+    if all_pages is None:
+        all_pages = _read_wiki_pages_on_disk(scope_dir / "kb" / "wiki")
+
+    link_index = _build_link_index(all_pages)
+    by_code = link_index["by_code"]
+    title_of = link_index["title_of"]
+
+    # Partition into screen-coded pages vs. everything else
+    other_pages = [p for p in all_pages if _screen_code(p.get("slug", "")) is None]
+
+    lines = [
+        f"# Knowledge Base — {scope_label}",
+        "",
+        "_Auto-generated by `/rai:pull`. Open `.rkm/` as an Obsidian vault._",
+        "",
+    ]
+
+    # --- Screens section: grouped by screen code, Design + Unit Tests nested ---
+    if by_code:
+        lines.append("## Screens")
+        lines.append("")
+        for code in sorted(by_code):
+            lines.append(f"### {code}")
+            lines.append("")
+            for design_slug in sorted(by_code[code]["design"]):
+                lines.append(
+                    f"- **Design:** [[{design_slug}|{title_of.get(design_slug, design_slug)}]]"
+                )
+            for ut_slug in sorted(by_code[code]["ut"]):
+                lines.append(
+                    f"- **Unit Tests:** [[{ut_slug}|{title_of.get(ut_slug, ut_slug)}]]"
+                )
+            lines.append("")
+
+    # --- Other pages: policies, ute-meta, test-page, etc. ---
+    if other_pages:
+        lines.append("## Other pages")
+        lines.append("")
+        for p in sorted(other_pages, key=lambda x: x.get("title", "")):
+            lines.append(f"- [[{p['slug']}|{p['title']}]]")
+        lines.append("")
+
+    # --- Cross-scope navigation ---
+    lines.append("---")
+    lines.append("")
+    projects_dir = LOCAL_RKM / "projects"
+    if scope_label == "Org":
+        if projects_dir.exists():
+            proj_slugs = sorted(d.name for d in projects_dir.iterdir() if d.is_dir())
+            if proj_slugs:
+                lines.append("## Related Projects")
+                lines.append("")
+                for ps in proj_slugs:
+                    lines.append(f"- [[projects/{ps}/kb/wiki/INDEX|{ps}]]")
+                lines.append("")
+    else:
+        lines.append("## Org Knowledge Base")
+        lines.append("")
+        lines.append("- [[org/kb/wiki/INDEX|Org Knowledge Base]]")
+        lines.append("")
+
+    # --- Skills ---
+    lines.extend(_skills_section_lines(scope_dir))
+
+    wiki_dir = scope_dir / "kb" / "wiki"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    (wiki_dir / "INDEX.md").write_text("\n".join(lines))
+
+
+def _write_root_index() -> None:
+    """Regenerate .rkm/INDEX.md linking into org/ and projects/<slug>/."""
+    lines = [
+        "# RKMemoria Vault",
+        "",
+        "_Auto-generated by `/rai:pull`. Open this folder as an Obsidian vault._",
+        "",
+        "## Org-wide resources",
+        "",
+        "- [[org/kb/wiki/INDEX|Org Knowledge Base]]",
+        "",
+        "## Projects",
+        "",
+    ]
+    projects_dir = LOCAL_RKM / "projects"
+    if projects_dir.exists():
+        for slug_dir in sorted(projects_dir.iterdir()):
+            if slug_dir.is_dir():
+                n_skills = len(_read_skills_index(slug_dir))
+                if n_skills == 1:
+                    skill_note = " — 1 skill"
+                elif n_skills > 1:
+                    skill_note = f" — {n_skills} skills"
+                else:
+                    skill_note = ""
+                lines.append(f"- [[projects/{slug_dir.name}/kb/wiki/INDEX|{slug_dir.name}]]{skill_note}")
+    lines.append("")
+    (LOCAL_RKM / "INDEX.md").write_text("\n".join(lines))
+
+
+# Keep legacy name as alias so any external callers are unbroken
+def _write_vault_scaffold(all_pages: list, vault_dir: "Path") -> None:
+    """Legacy shim: write scope INDEX.md. .obsidian now lives at .rkm/ root."""
+    _ensure_vault_obsidian()
+    # Derive a label from the vault_dir name (e.g. "wiki" → parent scope dir)
+    scope_dir = vault_dir.parent.parent  # vault_dir = <scope>/kb/wiki
+    scope_label = scope_dir.name.replace("-", " ").title()
+    _write_scope_index(all_pages, scope_dir, scope_label)
+    _write_root_index()
 
 
 # ---------------------------------------------------------------------------
 # Pull KB
 # ---------------------------------------------------------------------------
 
+async def _fetch_all_pages(client: "httpx.AsyncClient", url: str, params: dict) -> list:
+    """Fetch all items from a paginated endpoint (max limit=100 per page)."""
+    items: list = []
+    page = 1
+    while True:
+        resp = await client.get(url, params={**params, "page": page, "limit": 100})
+        resp.raise_for_status()
+        data = resp.json()
+        batch = _extract_items(data)
+        items.extend(batch)
+        total = data.get("total", len(items)) if isinstance(data, dict) else len(items)
+        if len(items) >= total or not batch:
+            break
+        page += 1
+    return items
+
+
 async def _pull_kb(cfg: dict, args: dict) -> dict:
     force = args.get("force", False)
     wiki_only = args.get("wiki_only", False)
     sources_only = args.get("sources_only", False)
+    scope = args.get("scope", "both")  # "org" | "project" | "both"
     project_id = cfg.get("project_id")
     etag_cache = _etag_cache()
     pulled_wiki, pulled_sources, skipped = [], [], []
 
+    _ensure_vault_obsidian()
+
     if not sources_only:
-        wiki_dest = LOCAL_RKM / "kb" / "wiki"
-        wiki_dest.mkdir(parents=True, exist_ok=True)
         async with _client(cfg) as c:
-            resp = await c.get("/api/v1/wiki/", params={"project_id": project_id, "limit": 200})
-            resp.raise_for_status()
-            pages = resp.json()
-        for page in pages:
-            key = f"wiki:{page['slug']}"
-            etag = str(page.get("updated_at", ""))
-            if not force and etag_cache.get(key) == etag:
-                skipped.append(page["slug"])
-                continue
-            (wiki_dest / f"{page['slug']}.md").write_text(
-                f"# {page['title']}\n\n{page.get('content_md', '')}"
-            )
-            etag_cache[key] = etag
-            pulled_wiki.append(page["slug"])
+            all_pages = await _fetch_all_pages(c, "/api/v1/wiki/", {"project_id": project_id})
+
+        # Partition by visibility
+        org_pages = [p for p in all_pages if p.get("visibility") == "org"]
+        proj_pages = [p for p in all_pages if p.get("visibility") != "org"]
+
+        wiki_buckets = []
+        if scope in ("org", "both"):
+            wiki_buckets.append((_kb_dir(_org_dir()) / "wiki", org_pages, "Org"))
+        if scope in ("project", "both"):
+            wiki_buckets.append((_kb_dir(_project_dir(cfg)) / "wiki", proj_pages, _project_slug(cfg)))
+
+        for wiki_dest, pages, label in wiki_buckets:
+            wiki_dest.mkdir(parents=True, exist_ok=True)
+            link_index = _build_link_index(pages)
+            for page in pages:
+                key = f"wiki:{page['slug']}"
+                etag = str(page.get("updated_at", ""))
+                if not force and etag_cache.get(key) == etag:
+                    skipped.append(page["slug"])
+                    continue
+                body = _resolve_wikilinks(page.get("content_md", ""), link_index)
+                body += _related_section(page["slug"], link_index)
+                content = f"{_wiki_frontmatter(page)}\n\n# {page['title']}\n\n{body}"
+                (wiki_dest / f"{page['slug']}.md").write_text(content)
+                etag_cache[key] = etag
+                pulled_wiki.append(page["slug"])
+            # Regenerate scope INDEX.md + root INDEX.md on every pull
+            _write_scope_index(pages, wiki_dest.parent.parent, label)
+        _write_root_index()
 
     if not wiki_only:
-        sources_dest = LOCAL_RKM / "kb" / "sources"
-        sources_dest.mkdir(parents=True, exist_ok=True)
         async with _client(cfg) as c:
-            resp = await c.get("/api/v1/sources/", params={"project_id": project_id, "limit": 200})
-            resp.raise_for_status()
-            sources = resp.json()
-        for src in sources:
-            key = f"source:{src['id']}"
-            etag = str(src.get("updated_at", src.get("created_at", "")))
-            if not force and etag_cache.get(key) == etag:
-                skipped.append(f"source:{src['id']}")
-                continue
-            (sources_dest / f"{src['id']}.json").write_text(json.dumps(src, indent=2))
-            etag_cache[key] = etag
-            pulled_sources.append(src["id"])
+            sources = await _fetch_all_pages(c, "/api/v1/sources/", {"project_id": project_id})
+
+        org_sources = [s for s in sources if s.get("visibility") == "org"]
+        proj_sources = [s for s in sources if s.get("visibility") != "org"]
+
+        src_buckets = []
+        if scope in ("org", "both"):
+            src_buckets.append((_kb_dir(_org_dir()) / "sources", org_sources))
+        if scope in ("project", "both"):
+            src_buckets.append((_kb_dir(_project_dir(cfg)) / "sources", proj_sources))
+
+        for sources_dest, bucket in src_buckets:
+            sources_dest.mkdir(parents=True, exist_ok=True)
+            for src in bucket:
+                key = f"source:{src['id']}"
+                etag = str(src.get("updated_at", src.get("created_at", "")))
+                if not force and etag_cache.get(key) == etag:
+                    skipped.append(f"source:{src['id']}")
+                    continue
+                (sources_dest / f"{src['id']}.json").write_text(json.dumps(src, indent=2))
+                etag_cache[key] = etag
+                pulled_sources.append(src["id"])
 
     _save_etag_cache(etag_cache)
     return {"pulled_wiki": pulled_wiki, "pulled_sources": pulled_sources, "skipped_etag_match": skipped}
@@ -461,9 +1069,21 @@ from skill_packager import _pack_skill, _sign_bundle  # noqa: E402
 async def _push_skill(cfg: dict, args: dict) -> dict:
     slug = args["slug"]
     on_conflict = args.get("on_conflict", "replace")
-    skill_dir = LOCAL_RKM / "skills" / slug
-    if not skill_dir.exists():
-        return {"error": f"Skill '{slug}' not found in .rkm/skills/"}
+    scope = args.get("scope")  # "org" | "project" | None (search both)
+    # Resolve skill directory based on scope
+    if scope == "org":
+        candidates = [_org_dir() / "skills" / slug]
+    elif scope == "project":
+        candidates = [_project_dir(cfg) / "skills" / slug]
+    else:
+        # Default: search org then project
+        candidates = [
+            _org_dir() / "skills" / slug,
+            _project_dir(cfg) / "skills" / slug,
+        ]
+    skill_dir = next((p for p in candidates if p.exists()), None)
+    if skill_dir is None:
+        return {"error": f"Skill '{slug}' not found in .rkm/org/skills/ or .rkm/projects/<slug>/skills/"}
 
     zip_bytes = _sign_bundle(_pack_skill(skill_dir), slug)
 
@@ -500,7 +1120,7 @@ async def _pull_repos(cfg: dict, args: dict) -> dict:
         return {"error": "No project_id in config. Run /rai:login first."}
 
     etag_cache = _etag_cache()
-    dest = LOCAL_RKM / "repos"
+    dest = _project_dir(cfg) / "repos"
     dest.mkdir(parents=True, exist_ok=True)
 
     async with _client(cfg) as c:
@@ -534,6 +1154,44 @@ async def _list_workflows(cfg: dict) -> list:
         resp = await c.get("/api/v1/workflows/mine")
         resp.raise_for_status()
     return resp.json()
+
+
+async def _list_skills(cfg: dict, args: dict) -> dict:
+    """List available skills without downloading bundles.
+
+    Returns {"org": [...], "project": [...]} where each entry is a compact
+    {slug, name, tags, runtime, project_id, updated_at} dict.
+    Supports optional 'tag' filter and 'scope' (org|project|both, default both).
+    """
+    async with _client(cfg) as c:
+        resp = await c.get("/api/v1/skills/", params={"limit": 100})
+        resp.raise_for_status()
+    rows = _extract_items(resp.json())
+
+    # Optional tag filter (mirrors _pull_skills)
+    tag = args.get("tag")
+    if tag:
+        rows = [s for s in rows if tag in (s.get("tags") or [])]
+
+    # Partition org vs project (same rule as _pull_skills)
+    org_skills = [s for s in rows if s.get("project_id") is None]
+    project_skills = [s for s in rows if s.get("project_id") is not None]
+
+    # Compact projection — only metadata needed for the picker
+    _compact = lambda s: {
+        "slug": s.get("slug"),
+        "name": s.get("name"),
+        "tags": s.get("tags") or [],
+        "runtime": s.get("runtime", "prompt"),
+        "project_id": s.get("project_id"),
+        "updated_at": s.get("updated_at"),
+    }
+
+    scope = args.get("scope", "both")
+    return {
+        "org": [_compact(s) for s in org_skills] if scope in ("org", "both") else [],
+        "project": [_compact(s) for s in project_skills] if scope in ("project", "both") else [],
+    }
 
 
 async def _run_workflow(cfg: dict, args: dict) -> dict:
@@ -576,7 +1234,7 @@ async def _login(args: dict) -> dict:
     """Device authorization flow: opens browser, polls until user approves."""
     import webbrowser
 
-    platform_url = args["platform_url"].rstrip("/")
+    platform_url = (args.get("platform_url") or DEFAULT_PLATFORM_URL).rstrip("/")
 
     # 1. Start device flow
     async with httpx.AsyncClient(base_url=platform_url, timeout=15) as c:
@@ -679,6 +1337,415 @@ async def _download_artifact(cfg: dict, args: dict) -> dict:
         resp = await c.get(f"/api/v1/skill-runs/{run_id}/artifacts/{filename}/url")
         resp.raise_for_status()
     return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# KB ingest helpers (imported from kb_ingest.py in the same directory)
+# ---------------------------------------------------------------------------
+
+from kb_ingest import (  # noqa: E402
+    clean_text as _kb_clean_text,
+    extract_url as _kb_extract_url,
+    file_to_text as _kb_file_to_text,
+    ingest_folder as _kb_ingest_folder,
+    ingest_zip as _kb_ingest_zip,
+    local_source_id as _kb_local_source_id,
+    _MAX_RAW_TEXT_CHARS as _KB_MAX_CHARS,
+)
+
+
+def _parse_wiki_frontmatter(file_content: str) -> dict | None:
+    """Parse the YAML-like frontmatter + body from a wiki .md file written by _pull_kb."""
+    if not file_content.startswith("---\n"):
+        return None
+    rest = file_content[4:]
+    end = rest.find("\n---\n")
+    if end == -1:
+        return None
+    fm_block = rest[:end]
+    body = rest[end + 5:]  # skip the closing "\n---\n"
+
+    result: dict = {"content_md": body.strip()}
+    for line in fm_block.splitlines():
+        m = re.match(r"^(\w+):\s*(.*)", line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        if val.startswith('"') and val.endswith('"'):
+            val = val[1:-1].replace('\\"', '"')
+        list_m = re.match(r"^\[([^\]]*)\]$", val)
+        if list_m:
+            raw = list_m.group(1).strip()
+            if raw:
+                items = [i.strip() for i in raw.split(",") if i.strip()]
+                try:
+                    val = [int(i) for i in items]
+                except ValueError:
+                    val = items
+            else:
+                val = []
+        elif val in ("None", "null"):
+            val = None
+        elif val.lstrip("-").isdigit():
+            val = int(val)
+        result[key] = val
+    return result
+
+
+async def _ingest(cfg: dict, args: dict) -> dict:
+    """Extract a local/remote source and write it to .rkm/kb/sources/<id>.json."""
+    title = args.get("title") or "Untitled"
+    project_id = args.get("project_id") or cfg.get("project_id")
+    knowledge_type_id = args.get("knowledge_type_id")
+
+    # Determine source type and extract raw text
+    if "text" in args:
+        source_type = "text"
+        raw_text = args["text"]
+        extra: dict = {}
+    elif "url" in args:
+        source_type = "url"
+        raw_text = await _kb_extract_url(args["url"])
+        extra = {"url": args["url"]}
+    elif "file" in args:
+        source_type = "file"
+        p = Path(args["file"]).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        raw_bytes = p.read_bytes()
+        extracted = _kb_file_to_text(str(p), raw_bytes)
+        if extracted is None:
+            return {"error": f"Unsupported or empty file: {p.suffix}"}
+        raw_text = extracted
+        extra = {"file_path": str(p)}
+    elif "folder" in args:
+        source_type = "folder"
+        p = Path(args["folder"]).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"Path not found: {p}"}
+        if p.is_dir():
+            raw_text = _kb_ingest_folder(p)
+        elif p.suffix.lower() == ".zip":
+            raw_text = _kb_ingest_zip(p)
+        else:
+            return {"error": f"--folder must be a directory or .zip file: {p}"}
+        extra = {"file_path": str(p)}
+    else:
+        return {"error": "Provide one of: text, url, file, or folder"}
+
+    raw_text = _kb_clean_text(raw_text)
+    if len(raw_text) > _KB_MAX_CHARS:
+        raw_text = raw_text[:_KB_MAX_CHARS]
+
+    source_id = _kb_local_source_id(raw_text or title)
+
+    sources_dest = _kb_dir() / "sources"
+    sources_dest.mkdir(parents=True, exist_ok=True)
+
+    record: dict = {
+        "id": source_id,
+        "title": title,
+        "source_type": source_type,
+        "status": "completed",
+        "project_id": project_id,
+        "knowledge_type_id": knowledge_type_id,
+        "raw_text": raw_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        **extra,
+    }
+    (sources_dest / f"{source_id}.json").write_text(json.dumps(record, indent=2))
+
+    return {
+        "source_id": source_id,
+        "title": title,
+        "source_type": source_type,
+        "char_count": len(raw_text),
+        "raw_text": raw_text,
+    }
+
+
+async def _push_kb(cfg: dict, args: dict) -> dict:
+    """Push local KB (sources/wiki) to the platform.
+
+    scope='org'     → reads .rkm/org/kb/,                   visibility='org'
+    scope='project' → reads .rkm/projects/<slug>/kb/,        visibility='project'
+    scope='both'    → reads both scoped dirs (default)
+    scope=None      → legacy: reads _kb_dir() (kb_dir override or .rkm/kb/)
+    """
+    wiki_only = args.get("wiki_only", False)
+    sources_only = args.get("sources_only", False)
+    force = args.get("force", False)
+    scope = args.get("scope")  # "org" | "project" | "both" | None (legacy)
+    project_id = cfg.get("project_id")
+    etag_cache = _etag_cache()
+    pushed_sources: list = []
+    pushed_wiki: list = []
+    skipped: list = []
+    errors: list = []
+
+    # Resolve (kb_base_dir, visibility) pairs
+    if scope == "org":
+        kb_roots = [(_kb_dir(_org_dir()), "org")]
+    elif scope == "project":
+        kb_roots = [(_kb_dir(_project_dir(cfg)), "project")]
+    elif scope == "both":
+        kb_roots = [
+            (_kb_dir(_org_dir()), "org"),
+            (_kb_dir(_project_dir(cfg)), "project"),
+        ]
+    else:
+        # Legacy path: kb_dir override or .rkm/kb/
+        kb_roots = [(_kb_dir(), "project")]
+
+    for kb_base, visibility in kb_roots:
+        if not wiki_only:
+            sources_dir = kb_base / "sources"
+            if sources_dir.exists():
+                for src_file in sorted(sources_dir.glob("*.json")):
+                    record = json.loads(src_file.read_text())
+                    src_id = record["id"]
+                    raw_text = record.get("raw_text", "")
+                    etag_key = f"push-source:{src_id}"
+                    etag = hashlib.sha1(raw_text.encode()).hexdigest()[:16]
+
+                    if not force and etag_cache.get(etag_key) == etag:
+                        skipped.append(src_id)
+                        continue
+
+                    src_project_id = record.get("project_id") or project_id
+                    try:
+                        async with _client(cfg) as c:
+                            if record.get("source_type") == "url" and record.get("url"):
+                                resp = await c.post("/api/v1/sources/url", json={
+                                    "title": record["title"],
+                                    "url": record["url"],
+                                    "project_id": src_project_id,
+                                    "visibility": visibility,
+                                })
+                            else:
+                                resp = await c.post("/api/v1/sources/text", json={
+                                    "title": record["title"],
+                                    "text": raw_text,
+                                    "project_id": src_project_id,
+                                    "visibility": visibility,
+                                })
+                            resp.raise_for_status()
+                        platform_record = resp.json()
+                        record["platform_id"] = platform_record["id"]
+                        src_file.write_text(json.dumps(record, indent=2))
+                        etag_cache[etag_key] = etag
+                        pushed_sources.append(src_id)
+                    except Exception as exc:
+                        errors.append({"source_id": src_id, "error": str(exc)})
+
+        if not sources_only:
+            wiki_dir = kb_base / "wiki"
+            if wiki_dir.exists():
+                for wiki_file in sorted(wiki_dir.glob("*.md")):
+                    if wiki_file.name == "INDEX.md":
+                        continue
+                    content = wiki_file.read_text()
+                    page = _parse_wiki_frontmatter(content)
+                    if not page:
+                        errors.append({"wiki_file": wiki_file.name, "error": "Could not parse frontmatter"})
+                        continue
+
+                    slug = page.get("slug", "")
+                    if not slug:
+                        errors.append({"wiki_file": wiki_file.name, "error": "Missing slug in frontmatter"})
+                        continue
+
+                    etag_key = f"push-wiki:{slug}"
+                    etag = hashlib.sha1(content.encode()).hexdigest()[:16]
+
+                    if not force and etag_cache.get(etag_key) == etag:
+                        skipped.append(slug)
+                        continue
+
+                    page_project_id = page.get("project_id") or project_id
+                    try:
+                        async with _client(cfg) as c:
+                            check = await c.get(f"/api/v1/wiki/slug/{slug}")
+                            if check.status_code == 404:
+                                resp = await c.post("/api/v1/wiki/", json={
+                                    "title": page.get("title", slug),
+                                    "content_md": page["content_md"],
+                                    "project_id": page_project_id,
+                                    "knowledge_type_id": page.get("knowledge_type_id"),
+                                    "visibility": visibility,
+                                })
+                            else:
+                                check.raise_for_status()
+                                existing = check.json()
+                                resp = await c.patch(f"/api/v1/wiki/{existing['id']}", json={
+                                    "title": page.get("title", slug),
+                                    "content_md": page["content_md"],
+                                    "summary": page.get("summary"),
+                                })
+                            resp.raise_for_status()
+                        etag_cache[etag_key] = etag
+                        pushed_wiki.append(slug)
+                    except Exception as exc:
+                        errors.append({"slug": slug, "error": str(exc)})
+
+    _save_etag_cache(etag_cache)
+    return {
+        "pushed_sources": pushed_sources,
+        "pushed_wiki": pushed_wiki,
+        "skipped_etag_match": skipped,
+        "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Push workflows
+# ---------------------------------------------------------------------------
+
+async def _push_workflows(cfg: dict, args: dict) -> dict:
+    """Push local workflow JSON files back to the platform.
+
+    Reads .rkm/projects/<slug>/workflows/*.json, remaps skill slugs to current
+    environment skill IDs, then creates or updates workflows via the platform API.
+    Workflows are always project-scoped; org scope is not applicable.
+    """
+    force = args.get("force", False)
+    project_id = cfg.get("project_id")
+    if not project_id:
+        return {"error": "No project_id in config. Run /rai:login first."}
+
+    src_dir = _project_dir(cfg) / "workflows"
+    if not src_dir.exists():
+        return {
+            "pushed": [], "skipped_etag_match": [], "errors": [],
+            "note": "No local workflows found. Run /rai:pull (Project × Workflows) first.",
+        }
+
+    etag_cache = _etag_cache()
+    errors: list = []
+    pushed: list = []
+    skipped: list = []
+
+    # Build slug→id map from the platform's current skills
+    try:
+        async with _client(cfg) as c:
+            skills_resp = await c.get("/api/v1/skills/", params={"limit": 500})
+            skills_resp.raise_for_status()
+            slug_to_id: dict[str, int] = {
+                s["slug"]: s["id"]
+                for s in _extract_items(skills_resp.json())
+            }
+    except Exception as exc:
+        return {"error": f"Failed to fetch skills for slug→id remapping: {exc}"}
+
+    # Fetch existing workflows once (for upsert matching by name)
+    try:
+        async with _client(cfg) as c:
+            mine_resp = await c.get("/api/v1/workflows/mine")
+            mine_resp.raise_for_status()
+            existing_by_name: dict[str, dict] = {w["name"]: w for w in mine_resp.json()}
+    except Exception as exc:
+        return {"error": f"Failed to fetch existing workflows: {exc}"}
+
+    # Collect workflow files; filter to requested slugs if not pushing all
+    wf_files = sorted(f for f in src_dir.glob("*.json") if f.name != "_index.json")
+    if not args.get("all") and args.get("slugs"):
+        slug_set = set(args["slugs"])
+        wf_files = [f for f in wf_files if f.stem in slug_set]
+
+    for wf_file in wf_files:
+        wf_slug = wf_file.stem
+        content = wf_file.read_text()
+        etag_key = f"push-workflow:{wf_slug}"
+        etag = hashlib.sha1(content.encode()).hexdigest()[:16]
+
+        if not force and etag_cache.get(etag_key) == etag:
+            skipped.append(wf_slug)
+            continue
+
+        try:
+            wf = json.loads(content)
+        except Exception as exc:
+            errors.append({"slug": wf_slug, "error": f"JSON parse error: {exc}"})
+            continue
+
+        steps = wf.get("steps", [])
+        if not steps:
+            errors.append({"slug": wf_slug, "error": "Workflow has no steps; platform requires at least one step"})
+            continue
+
+        # Remap step skill_ids using current platform slug→id mapping
+        remapped_steps = []
+        remap_errors = []
+        for step in steps:
+            skill_slug = step.get("skill_slug")
+            if not skill_slug:
+                remap_errors.append(f"step {step.get('step_index', '?')} has no skill_slug")
+                continue
+            skill_id = slug_to_id.get(skill_slug)
+            if skill_id is None:
+                remap_errors.append(f"skill '{skill_slug}' not found on platform")
+                continue
+            remapped_steps.append({"step_index": step["step_index"], "skill_id": skill_id})
+
+        if remap_errors:
+            errors.append({"slug": wf_slug, "error": "; ".join(remap_errors)})
+            continue
+
+        payload: dict[str, Any] = {
+            "name": wf.get("name", wf_slug),
+            "description": wf.get("description"),
+            "tags": wf.get("tags", []),
+            "steps": remapped_steps,
+        }
+
+        try:
+            async with _client(cfg) as c:
+                existing = existing_by_name.get(wf.get("name", wf_slug))
+                if existing:
+                    resp = await c.patch(f"/api/v1/workflows/{existing['id']}", json=payload)
+                else:
+                    resp = await c.post("/api/v1/workflows/", json={**payload, "project_id": project_id})
+                resp.raise_for_status()
+            etag_cache[etag_key] = etag
+            pushed.append(wf_slug)
+        except Exception as exc:
+            errors.append({"slug": wf_slug, "error": str(exc)})
+
+    _save_etag_cache(etag_cache)
+    return {"pushed": pushed, "skipped_etag_match": skipped, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Set KB folder
+# ---------------------------------------------------------------------------
+
+def _set_kb(arguments: dict) -> dict:
+    """Set (or clear) the project-level KB folder override in .rkm/config.json."""
+    folder = arguments.get("folder")
+    clear = arguments.get("clear", False)
+    cfg = _load_project_config()
+
+    if clear:
+        cfg.pop("kb_dir", None)
+        _save_project_config(cfg)
+        kb = LOCAL_RKM / "kb"
+    else:
+        if not folder:
+            return {"error": "folder is required (or pass clear=true to reset to default)"}
+        p = Path(folder).expanduser()
+        kb = p if p.is_absolute() else (Path.cwd() / p)
+        cfg["kb_dir"] = folder  # store as-given so relative paths stay portable
+        _save_project_config(cfg)
+
+    (kb / "wiki").mkdir(parents=True, exist_ok=True)
+    (kb / "sources").mkdir(parents=True, exist_ok=True)
+    return {
+        "kb_dir": str(kb),
+        "wiki_dir": str(kb / "wiki"),
+        "sources_dir": str(kb / "sources"),
+        "config_path": str(PROJECT_CONFIG_PATH),
+        "cleared": clear,
+    }
 
 
 # ---------------------------------------------------------------------------

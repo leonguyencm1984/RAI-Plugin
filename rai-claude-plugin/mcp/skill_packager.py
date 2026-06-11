@@ -134,6 +134,7 @@ def generate_skill_yaml(
     skill_dir: Path,
     fm: dict,
     runtime: Optional[str] = None,
+    kb_contract: Optional[dict] = None,
 ) -> str:
     """Build a minimal valid skill.yaml manifest from SKILL.md frontmatter.
 
@@ -179,6 +180,18 @@ def generate_skill_yaml(
         "server_executable: false",
         "variables: []",
     ]
+    if kb_contract is not None:
+        ki = kb_contract.get("kb_input", {})
+        ko = kb_contract.get("kb_output", {})
+        lines += [
+            "kb_input_contract:",
+            f"  enabled: {str(ki.get('enabled', False)).lower()}",
+            f"  retrieval: {ki.get('retrieval', 'none')}",
+            "kb_output_contract:",
+            f"  enabled: {str(ko.get('enabled', False)).lower()}",
+            f"  target: {ko.get('target', 'wiki')}",
+            f"  namespace: \"{ko.get('namespace', '')}\"",
+        ]
     return "\n".join(lines) + "\n"
 
 

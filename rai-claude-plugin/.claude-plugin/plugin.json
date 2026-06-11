@@ -5,7 +5,8 @@
   "mcpServers": {
     "rai": {
       "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"],
+      "env": { "RAI_PLATFORM_URL": "http://localhost:8001" }
     }
   },
   "skills": "./skills/"

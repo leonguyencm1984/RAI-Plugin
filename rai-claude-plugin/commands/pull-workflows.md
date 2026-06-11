@@ -1,6 +1,6 @@
 # /rai:pull-workflows
 
-Pull workflows from the platform to `.rkm/workflows/`.
+Pull workflows from the platform to `.rkm/projects/<slug>/workflows/`. Workflows are always project-scoped.
 
 ## Usage
 
@@ -18,5 +18,10 @@ Pull workflows from the platform to `.rkm/workflows/`.
 3. Display the result:
    ```
    Workflows: <N> pulled, <M> skipped (ETag match)
-   Written to .rkm/workflows/
+   Written to .rkm/projects/<slug>/workflows/
    ```
+
+## Notes
+
+- Workflows are always project-scoped (no org-level workflows exist on the platform).
+- The active project slug comes from `~/.rkm/config.json` set at login.

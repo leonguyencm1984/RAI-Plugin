@@ -23,7 +23,7 @@ Then restart Claude Code so the commands register.
 ## Quick start
 
 ```
-/rai:login         # one-time setup — enter platform URL + MCPToken
+/rai:login         # one-time setup — enter MCPToken (platform URL pre-configured: http://localhost:8001)
 /rai:status        # see what's available
 /rai:pull          # interactive picker
 ```
