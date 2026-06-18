@@ -100,6 +100,69 @@ def _kb_dir(base=None) -> Path:
     return LOCAL_RKM / "kb"
 
 
+# ---------------------------------------------------------------------------
+# Native-Claude skill install
+# Pulled bundles live in the .rkm vault (runnable via /rai:run-skill). To make a
+# pulled skill *immediately* invocable as a native /slash-skill, we also mirror it
+# into Claude Code's skill-discovery directory (.claude/skills/<slug>).
+# ---------------------------------------------------------------------------
+
+def _claude_skills_dir() -> Path:
+    """Claude Code's project-level skill-discovery directory (.claude/skills)."""
+    return Path.cwd() / ".claude" / "skills"
+
+
+def _install_to_claude(slug: str, skill_dir: Path) -> None:
+    """Mirror a pulled skill bundle into .claude/skills/<slug> so it is immediately
+    invocable as a native /slash-skill — not only via /rai:run-skill.
+
+    Behavior notes:
+    - This rmtree+copytree from the vault on every install, so the **vault is the
+      source of truth** — edit pulled skills in .rkm/.../skills/<slug>, NOT in
+      .claude/skills/<slug> (direct edits there are overwritten on the next pull).
+    - Both org and project skills install into the *project* .claude/skills, so an
+      org skill becomes a native /skill in every workspace you pull it into.
+
+    Best-effort: any failure is logged and swallowed. The skill is still usable from
+    the vault, so a broken native install must never fail the pull.
+    """
+    import shutil
+    try:
+        target = _claude_skills_dir() / slug
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(skill_dir, target)
+    except Exception as e:  # noqa: BLE001 — best-effort install, never fatal
+        print(
+            f"[rkm] warning: could not install skill '{slug}' into .claude/skills: {e}",
+            file=sys.stderr,
+        )
+
+
+def _refresh_claude_skills_index(skills: list[dict]) -> None:
+    """Merge the given skills (slug/name/runtime) into .claude/skills/_index.json so
+    the index reflects what is installed for native discovery. Merge-only and
+    best-effort — never fatal, never drops entries it didn't write."""
+    try:
+        idx_path = _claude_skills_dir() / "_index.json"
+        existing: dict[str, dict] = {}
+        if idx_path.exists():
+            for item in json.loads(idx_path.read_text()):
+                if isinstance(item, dict) and item.get("slug"):
+                    existing[item["slug"]] = item
+        for s in skills:
+            existing[s["slug"]] = {
+                "slug": s["slug"],
+                "name": s.get("name", s["slug"]),
+                "runtime": s.get("runtime", "prompt"),
+            }
+        idx_path.parent.mkdir(parents=True, exist_ok=True)
+        idx_path.write_text(json.dumps(list(existing.values()), indent=2))
+    except Exception as e:  # noqa: BLE001 — convenience index, never fatal
+        print(f"[rkm] warning: could not refresh .claude/skills/_index.json: {e}", file=sys.stderr)
+
+
 def _client(cfg: dict) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=cfg.get("platform_url") or DEFAULT_PLATFORM_URL,
@@ -125,6 +188,33 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "platform_url": {"type": "string", "description": "Platform base URL (default: http://localhost:8001)"},
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="rkm_logout",
+            description=(
+                "Log out from the RKMemoria platform: clears token + project binding from ~/.rkm/config.json. "
+                "purge='keep' leaves the local .rkm/ vault untouched (default); 'archive' renames .rkm/ to "
+                ".rkm-archive-<timestamp> (recommended when switching accounts); 'delete' permanently removes "
+                "the vault contents and requires confirm=true. Server-side token revocation is NOT performed — "
+                "revoke in the web UI under Settings → MCP Tokens."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "purge": {
+                        "type": "string",
+                        "enum": ["keep", "archive", "delete"],
+                        "default": "keep",
+                        "description": "What to do with the local .rkm/ vault (KB, skills, workflows, etag cache)",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Must be true when purge='delete' (irreversible)",
+                    },
                 },
                 "required": [],
             },
@@ -217,11 +307,20 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="rkm_pull_repos",
-            description="Pull repository metadata for the current project to .rkm/projects/<slug>/repos/",
+            description=(
+                "Resolve the current project's code repositories to one local checkout each "
+                "(link-first: configured repo_paths → remote match → clone into the vault; "
+                "fail loud on ambiguous/missing), build/refresh the local GitNexus index, and "
+                "write per-repo .rkm-meta.json (resolved_path, resolution_source, "
+                "local_indexed_commit, index_status). Skills resolve their source-code path "
+                "against the recorded resolved_path."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "force": {"type": "boolean", "default": False},
+                    "force": {"type": "boolean", "default": False, "description": "Re-fetch and hard-reset existing checkouts"},
+                    "shallow": {"type": "boolean", "default": False, "description": "git clone --depth 1"},
+                    "names": {"type": "array", "items": {"type": "string"}, "description": "Only pull these repo names (default: all)"},
                 },
             },
         ),
@@ -367,6 +466,26 @@ async def list_tools() -> list[types.Tool]:
                 },
             },
         ),
+        types.Tool(
+            name="rkm_push_run",
+            description=(
+                "Record an already-completed LOCAL skill run on the platform so it appears in the "
+                "run history / audit log (the /rai:run-skill --push action). Resolves the skill slug "
+                "to its platform id and POSTs to /api/v1/skill-runs/record — this does NOT re-execute "
+                "the skill. Call after a local script/hybrid run completes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Skill slug that was run locally"},
+                    "status": {"type": "string", "enum": ["succeeded", "failed", "cancelled"], "default": "succeeded"},
+                    "input_md": {"type": "string", "default": ""},
+                    "output_md": {"type": "string", "description": "Run output / summary"},
+                    "error": {"type": "string", "description": "Error message if the run failed"},
+                },
+                "required": ["slug"],
+            },
+        ),
     ]
 
 
@@ -380,6 +499,13 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     if name == "rkm_login":
         try:
             result = await _login(arguments)
+        except Exception as exc:
+            result = {"error": str(exc)}
+        return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+    if name == "rkm_logout":
+        try:
+            result = await _logout(arguments)
         except Exception as exc:
             result = {"error": str(exc)}
         return [types.TextContent(type="text", text=json.dumps(result, default=str))]
@@ -415,6 +541,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await _run_status(cfg, arguments)
         elif name == "rkm_run_skill_streaming":
             result = await _run_skill_streaming(cfg, arguments)
+        elif name == "rkm_push_run":
+            result = await _push_run(cfg, arguments)
         elif name == "rkm_download_artifact":
             result = await _download_artifact(cfg, arguments)
         elif name == "search_knowledge":
@@ -587,7 +715,24 @@ async def _pull_skills(cfg: dict, args: dict) -> dict:
             etag = str(skill.get("updated_at", ""))
             skill_dir = dest / slug
 
-            if not force and etag_cache.get(key) == etag:
+            claude_target = _claude_skills_dir() / slug
+            # Up-to-date only when the etag matches AND the bundle is on disk AND it
+            # is installed for native discovery. A matching etag with a missing
+            # bundle (vault cleared but cache kept) must not short-circuit —
+            # otherwise the user "pulls" a skill and silently gets nothing.
+            if (
+                not force
+                and etag_cache.get(key) == etag
+                and skill_dir.exists()
+                and claude_target.exists()
+            ):
+                skipped.append(slug)
+                continue
+            # Etag matches and the bundle is present, but the native install
+            # drifted (missing) — repair it from the existing vault bundle without
+            # a re-download, then skip.
+            if not force and etag_cache.get(key) == etag and skill_dir.exists():
+                _install_to_claude(slug, skill_dir)
                 skipped.append(slug)
                 continue
 
@@ -606,9 +751,19 @@ async def _pull_skills(cfg: dict, args: dict) -> dict:
                         zf.extractall(skill_dir)
                     (skill_dir / ".rkm-etag").write_text(etag)
                     etag_cache[key] = etag
+                    # Mirror into Claude's skill-discovery path so the freshly
+                    # pulled skill is immediately invocable as a native /slash-skill.
+                    _install_to_claude(slug, skill_dir)
                     pulled.append(slug)
                 else:
                     conflicts.append(slug)
+
+        # Ensure every on-disk skill has its output/ folder so runs have a stable
+        # destination: .rkm/.../skills/<slug>/output (req 3). KB push stays opt-in.
+        for skill in bucket:
+            sd = dest / skill["slug"]
+            if sd.exists():
+                (sd / "output").mkdir(exist_ok=True)
 
         # Write scoped index
         index = [{"slug": s["slug"], "name": s["name"], "runtime": s.get("runtime", "prompt")} for s in bucket]
@@ -622,6 +777,12 @@ async def _pull_skills(cfg: dict, args: dict) -> dict:
         _write_scope_index(None, scope_dir, label)
     if buckets:
         _write_root_index()
+
+    # Refresh the native-discovery index for everything installed this call.
+    _installed = set(pulled) | set(skipped)
+    _refresh_claude_skills_index(
+        [s for _dest, bucket in buckets for s in bucket if s["slug"] in _installed]
+    )
 
     _save_etag_cache(etag_cache)
     return {
@@ -1113,8 +1274,126 @@ async def _push_skill(cfg: dict, args: dict) -> dict:
 # Pull repos
 # ---------------------------------------------------------------------------
 
+def _git(args: list[str], cwd: Path | None = None, timeout: int = 600) -> tuple[int, str]:
+    """Run a git command, returning (returncode, combined_output). Best-effort:
+    a missing git binary surfaces as returncode 127 rather than an exception."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", *args], cwd=str(cwd) if cwd else None,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except FileNotFoundError:
+        return 127, "git binary not found on PATH"
+    except Exception as e:  # noqa: BLE001
+        return 1, str(e)
+
+
+# Optional sibling modules — repo resolution (T1) + local GitNexus indexing.
+# Degrade gracefully if unavailable so a pull never hard-fails on import.
+try:
+    import repo_resolve as _repo_resolve  # noqa: E402
+except Exception:  # noqa: BLE001
+    _repo_resolve = None
+try:
+    import gitnexus_index as _gnx  # noqa: E402
+except Exception:  # noqa: BLE001
+    _gnx = None
+
+
+def _head_commit(path: Path) -> str | None:
+    """`git rev-parse HEAD` for the local_indexed_commit metadata, or None when
+    the path is not a git checkout (e.g. a zip/folder-source repo)."""
+    if not (path / ".git").is_dir():
+        return None
+    rc, out = _git(["-C", str(path), "rev-parse", "HEAD"])
+    return out.strip() if rc == 0 else None
+
+
+def _initial_index(path: Path) -> str:
+    """Build (or incrementally refresh) the local GitNexus index for a resolved
+    checkout and return an index_status: 'indexed' | 'failed' | 'unavailable'.
+
+    `gitnexus analyze` is incremental by default, so this one call both builds the
+    first index and keeps an existing one fresh. skip_git is derived from the
+    presence of a .git dir so folder-source checkouts still index.
+    """
+    if _gnx is None:
+        return "unavailable"
+    skip_git = not (path / ".git").is_dir()
+    ok, _log = _gnx.analyze(path, skip_git=skip_git)
+    return "indexed" if ok else "failed"
+
+
+def _clone_or_update_repo(repo: dict, repo_dir: Path, shallow: bool, force: bool) -> str:
+    """Clone a repo's code into repo_dir or fast-forward an existing checkout.
+
+    Returns one of: 'cloned', 'updated', 'skipped', 'meta_only', or 'error:<msg>'.
+    Authentication relies on the local git environment (SSH keys / credential
+    helper); a private repo without local creds fails to 'error' and we keep the
+    metadata so the rest of the pull still succeeds.
+    """
+    git_url = repo.get("git_url") or repo.get("url")
+    branch = repo.get("default_branch") or "main"
+    if not git_url:
+        return "meta_only"  # zip/folder-source repo: no clonable URL
+
+    if (repo_dir / ".git").is_dir():
+        if not force:
+            return "skipped"
+        rc, out = _git(["-C", str(repo_dir), "fetch", "--all", "--prune"])
+        if rc != 0:
+            return f"error:{out.strip()[:200]}"
+        rc, out = _git(["-C", str(repo_dir), "reset", "--hard", f"origin/{branch}"])
+        return "updated" if rc == 0 else f"error:{out.strip()[:200]}"
+
+    clone_args = ["clone", "--branch", branch]
+    if shallow:
+        clone_args += ["--depth", "1"]
+    clone_args += [git_url, str(repo_dir)]
+    rc, out = _git(clone_args)
+    return "cloned" if rc == 0 else f"error:{out.strip()[:200]}"
+
+
+async def _download_repo_archive(cfg: dict, repo: dict, repo_dir: Path, force: bool) -> str:
+    """Download a zip/folder-source repo's code via the platform archive endpoint
+    and extract it into repo_dir. Returns 'downloaded', 'skipped', 'meta_only'
+    (not indexed yet → 409), or 'error:<msg>'.
+
+    The MCP token is accepted by GET /repositories/<id>/archive. We clear any prior
+    extraction (keeping .rkm-meta.json) so the checkout mirrors the latest snapshot.
+    """
+    import io as _io
+    import shutil
+    import zipfile
+    marker = repo_dir / ".rkm-archive"
+    etag = str(repo.get("updated_at", repo.get("created_at", "")))
+    if not force and marker.exists() and marker.read_text() == etag:
+        return "skipped"
+    try:
+        async with _client(cfg) as c:
+            r = await c.get(f"/api/v1/repositories/{repo['id']}/archive", timeout=600)
+        if r.status_code == 409:
+            return "meta_only"  # repo not indexed yet — trigger a sync first
+        if r.status_code != 200:
+            return f"error:HTTP {r.status_code} {r.text[:160]}"
+        for child in repo_dir.iterdir():
+            if child.name == ".rkm-meta.json":
+                continue
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
+        with zipfile.ZipFile(_io.BytesIO(r.content)) as zf:
+            zf.extractall(repo_dir)
+        marker.write_text(etag)
+        return "downloaded"
+    except Exception as e:  # noqa: BLE001
+        return f"error:{str(e)[:160]}"
+
+
 async def _pull_repos(cfg: dict, args: dict) -> dict:
     force = args.get("force", False)
+    shallow = args.get("shallow", False)
+    names = set(args.get("names") or [])
     project_id = cfg.get("project_id")
     if not project_id:
         return {"error": "No project_id in config. Run /rai:login first."}
@@ -1128,21 +1407,139 @@ async def _pull_repos(cfg: dict, args: dict) -> dict:
         resp.raise_for_status()
         repos = resp.json()
 
-    pulled, skipped = [], []
+    if names:
+        repos = [r for r in repos if r["name"] in names]
+
+    # Approach C resolution inputs: explicit name→path mapping and the bounded
+    # search roots scanned for an existing local checkout. Both live in the
+    # project-level .rkm/config.json (never the global token config).
+    project_cfg = _load_project_config()
+    repo_paths = project_cfg.get("repo_paths") or {}
+    search_roots = project_cfg.get("repo_search_roots") or []
+
+    cloned, updated, downloaded, skipped, meta_only, linked, errors = [], [], [], [], [], [], []
     for repo in repos:
+        name = repo["name"]
+        # The vault dir always holds the .rkm-meta.json sidecar, even when the code
+        # itself resolves to (and is indexed at) the user's own checkout elsewhere.
+        meta_dir = dest / name
+        meta_dir.mkdir(parents=True, exist_ok=True)
         key = f"repo:{repo['id']}"
         etag = str(repo.get("updated_at", repo.get("created_at", "")))
-        if not force and etag_cache.get(key) == etag:
-            skipped.append(repo["name"])
-            continue
-        (dest / f"{repo['name']}.json").write_text(json.dumps(repo, indent=2))
-        etag_cache[key] = etag
-        pulled.append(repo["name"])
+        has_git_url = bool(repo.get("git_url") or repo.get("url"))
+
+        # Resolve which local checkout this platform repo maps to (link-first).
+        if _repo_resolve is not None:
+            outcome = _repo_resolve.resolve_repo(
+                repo, repo_paths=repo_paths, search_roots=search_roots, vault_repo_dir=dest,
+            )
+            resolution_source, resolved_dir, resolve_reason = (
+                outcome.source, outcome.path, outcome.reason,
+            )
+        else:  # module unavailable → behave like the legacy clone-into-vault path
+            resolution_source, resolved_dir, resolve_reason = "clone", dest / name, ""
+
+        resolved_path: str | None = None    # path skills should use (set on success)
+        local_indexed_commit: str | None = None
+        index_status = "skipped"
+
+        if resolution_source in ("ambiguous", "none"):
+            # Fail loud: never auto-pick or clone over an unresolved repo. The
+            # reason tells the user how to disambiguate via repo_paths.
+            errors.append({"name": name, "error": resolve_reason})
+
+        elif resolution_source in ("configured", "linked"):
+            # Use the user's own checkout in place — never clone or mutate it.
+            # Build/refresh its local symbol index so skills get live impact data.
+            repo_dir = Path(resolved_dir)
+            resolved_path = str(repo_dir)
+            linked.append(name)
+            index_status = _initial_index(repo_dir)
+            local_indexed_commit = _head_commit(repo_dir)
+
+        else:  # "clone" — pull into the vault, then index the vault checkout
+            repo_dir = dest / name
+            resolved_path = str(repo_dir)
+            # Skip the network/git work when nothing changed and the checkout exists.
+            if not force and etag_cache.get(key) == etag and (repo_dir / ".git").is_dir():
+                skipped.append(name)
+            elif has_git_url:
+                result = _clone_or_update_repo(repo, repo_dir, shallow, force)
+                if result == "cloned":
+                    cloned.append(name)
+                elif result == "updated":
+                    updated.append(name)
+                elif result == "skipped":
+                    skipped.append(name)
+                elif result == "meta_only":
+                    meta_only.append(name)
+                elif result.startswith("error:"):
+                    # T5: a private repo without local git creds fails to clone.
+                    # Fall back to the server archive endpoint (the platform PAT stays
+                    # server-side) so the skill still gets code. Surface the original
+                    # clone error only if the archive fallback also fails.
+                    fb = await _download_repo_archive(cfg, repo, repo_dir, force)
+                    if fb == "downloaded":
+                        downloaded.append(name)
+                    elif fb == "skipped":
+                        skipped.append(name)
+                    elif fb == "meta_only":
+                        meta_only.append(name)
+                    else:
+                        errors.append({"name": name, "error": result[len("error:"):]})
+                etag_cache[key] = etag
+            else:
+                # zip/folder-source repo (no git_url): pull code via the archive endpoint.
+                result = await _download_repo_archive(cfg, repo, repo_dir, force)
+                if result == "downloaded":
+                    downloaded.append(name)
+                elif result == "skipped":
+                    skipped.append(name)
+                elif result == "meta_only":
+                    meta_only.append(name)
+                elif result.startswith("error:"):
+                    errors.append({"name": name, "error": result[len("error:"):]})
+                etag_cache[key] = etag
+            # Index whatever code now exists in the vault checkout. Skip pure
+            # meta-only repos (no .git and nothing but the metadata sidecars).
+            indexable = (repo_dir / ".git").is_dir() or any(
+                c.name not in (".rkm-meta.json", ".rkm-archive")
+                for c in repo_dir.iterdir()
+            )
+            if indexable:
+                index_status = _initial_index(repo_dir)
+                local_indexed_commit = _head_commit(repo_dir)
+
+        # Always persist the per-repo metadata alongside the vault dir so skills can
+        # resolve their source path even for meta-only (zip/folder) or linked repos.
+        (meta_dir / ".rkm-meta.json").write_text(json.dumps({
+            "id": repo["id"],
+            "name": name,
+            "git_url": repo.get("git_url") or repo.get("url"),
+            "default_branch": repo.get("default_branch") or "main",
+            "source_type": repo.get("source_type"),
+            "last_synced_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "gitnexus_indexed_commit": repo.get("gitnexus_indexed_commit"),
+            "resolved_path": resolved_path,
+            "resolution_source": resolution_source,
+            "local_indexed_commit": local_indexed_commit,
+            "index_status": index_status,
+        }, indent=2))
 
     _save_etag_cache(etag_cache)
-    index = [{"id": r["id"], "name": r["name"], "url": r.get("url", "")} for r in repos]
+    index = [{"id": r["id"], "name": r["name"], "git_url": r.get("git_url") or r.get("url", "")} for r in repos]
     (dest / "_index.json").write_text(json.dumps(index, indent=2))
-    return {"pulled": pulled, "skipped_etag_match": skipped, "total": len(repos)}
+    return {
+        "cloned": cloned,
+        "updated": updated,
+        "downloaded": downloaded,
+        "linked": linked,
+        "skipped": skipped,
+        "meta_only": meta_only,
+        "errors": errors,
+        "total": len(repos),
+        "repos_dir": str(dest),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1283,6 +1680,82 @@ async def _login(args: dict) -> dict:
     return {"status": "logged_in", "platform_url": platform_url, "message": "Credentials saved to ~/.rkm/config.json"}
 
 
+async def _logout(args: dict) -> dict:
+    """Local sign-out: clear credentials from ~/.rkm/config.json and optionally
+    archive or delete the workspace .rkm/ vault (KB, skills, workflows, etag cache).
+
+    The MCP bearer token cannot revoke itself server-side (DELETE /api/v1/mcp/tokens/{id}
+    requires web-session auth) — the user is pointed to Settings → MCP Tokens instead.
+    """
+    import shutil
+    from datetime import datetime, timezone
+
+    purge = args.get("purge", "keep")
+    if purge not in ("keep", "archive", "delete"):
+        return {"error": f"Invalid purge mode '{purge}' — use keep | archive | delete."}
+    if purge == "delete" and not args.get("confirm"):
+        return {"error": "purge='delete' is irreversible and requires confirm=true. "
+                         "Un-pushed local edits and skill scripts/.env files will be lost."}
+
+    result: dict = {"purge": purge}
+
+    # 1. Identify who is being signed out (best-effort; never blocks logout).
+    cfg: dict = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+        except Exception:
+            cfg = {}
+    was_logged_in = bool(cfg.get("token"))
+    if was_logged_in:
+        try:
+            async with _client(cfg) as c:
+                resp = await c.get("/api/v1/mcp/whoami")
+                if resp.status_code == 200:
+                    result["was_user"] = resp.json().get("user_email") or resp.json().get("email")
+        except Exception:
+            pass  # platform down / token already invalid — proceed with local sign-out
+
+    # 2. Clear credentials + project binding; keep platform_url for the next login.
+    if cfg:
+        for key in ("token", "project_id", "project_slug", "user_email"):
+            cfg.pop(key, None)
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+        try:
+            CONFIG_PATH.chmod(0o600)
+        except Exception:
+            pass
+    result["status"] = "logged_out" if was_logged_in else "not_logged_in"
+    result["config"] = str(CONFIG_PATH)
+
+    # 3. Vault handling.
+    if purge == "archive":
+        if LOCAL_RKM.exists():
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            dest = LOCAL_RKM.with_name(f".rkm-archive-{ts}")
+            LOCAL_RKM.rename(dest)
+            result["archived_to"] = str(dest)
+        else:
+            result["note_vault"] = "No local .rkm/ vault found — nothing to archive."
+    elif purge == "delete":
+        if LOCAL_RKM.exists():
+            removed = []
+            for entry in ("org", "projects", "kb", "runs", "INDEX.md",
+                          ".etag-cache.json", ".obsidian", "config.json"):
+                target = LOCAL_RKM / entry
+                if target.exists():
+                    shutil.rmtree(target) if target.is_dir() else target.unlink()
+                    removed.append(entry)
+            result["removed"] = removed
+        else:
+            result["note_vault"] = "No local .rkm/ vault found — nothing to delete."
+
+    result["note"] = ("Server-side token NOT revoked — revoke it in the web UI under "
+                      "Settings → MCP Tokens if this device should lose access. "
+                      "Run rkm_login (or /rai:login) to log in again with any account.")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Streaming run + artifact download
 # ---------------------------------------------------------------------------
@@ -1327,6 +1800,39 @@ async def _run_skill_streaming(cfg: dict, args: dict) -> dict:
         "stdout": "".join(stdout_lines),
         "artifacts": artifacts,
     }
+
+
+async def _push_run(cfg: dict, args: dict) -> dict:
+    """Record a completed LOCAL run on the platform (the /rai:run-skill --push action).
+
+    Resolves the skill slug → platform id, then POSTs to /api/v1/skill-runs/record.
+    Records history/audit only; it does NOT re-execute the skill.
+    """
+    slug = args["slug"]
+    async with _client(cfg) as c:
+        # Resolve slug → platform id. `search` filters by slug server-side (ilike),
+        # so this narrows the result set instead of paging the whole skill list —
+        # a slug past a fixed page size is no longer silently missed.
+        resp = await c.get("/api/v1/skills/", params={"search": slug, "limit": 100})
+        resp.raise_for_status()
+        skills = resp.json().get("items", [])
+        match = next((s for s in skills if s.get("slug") == slug), None)
+        if match is None:
+            return {"error": f"Skill '{slug}' not found on the platform; cannot push run history."}
+
+        payload = {
+            "skill_id": match["id"],
+            "status": args.get("status", "succeeded"),
+            "input_md": args.get("input_md", ""),
+            "output_md": args.get("output_md"),
+            "error": args.get("error"),
+            "project_id": cfg.get("project_id"),
+        }
+        resp = await c.post("/api/v1/skill-runs/record", json=payload)
+        if resp.status_code not in (200, 201):
+            return {"error": f"push failed: HTTP {resp.status_code} {resp.text[:200]}"}
+        run = resp.json()
+    return {"pushed": True, "run_id": run.get("id"), "status": run.get("status"), "skill": slug}
 
 
 async def _download_artifact(cfg: dict, args: dict) -> dict:
