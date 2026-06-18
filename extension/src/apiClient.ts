@@ -43,6 +43,16 @@ export class ApiClient {
     throw new ApiError(res.status, parseDetail(text, `HTTP ${res.status}`));
   }
 
+  /** Fetch a binary body (e.g. a repo archive zip) using the stored MCP token. */
+  async getBinary(path: string): Promise<ArrayBuffer> {
+    const token = await this.secrets.get(MCP_TOKEN_KEY);
+    const res = await this.doFetch(path, token ?? undefined, {});
+    if (res.status >= 200 && res.status < 300) {
+      return res.arrayBuffer();
+    }
+    throw new ApiError(res.status, parseDetail(await res.text(), `HTTP ${res.status}`));
+  }
+
   private async doFetch(path: string, token: string | undefined, opts: RequestOptions) {
     try {
       return await fetch(`${this.baseUrl}${path}`, {
