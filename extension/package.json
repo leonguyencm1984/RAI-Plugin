@@ -1,0 +1,72 @@
+{
+  "name": "rai-ide",
+  "displayName": "RAI",
+  "description": "RAI companion for VS Code and Antigravity — log in, pull/push KB·skills·workflows, pull repos, and apply per-repo onboarding.",
+  "version": "0.1.0",
+  "publisher": "rikkeisoft",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rai",
+          "title": "RAI",
+          "icon": "media/rai.svg"
+        }
+      ]
+    },
+    "views": {
+      "rai": [
+        { "id": "rai.projects", "name": "Projects" }
+      ]
+    },
+    "commands": [
+      { "command": "rai.login", "title": "RAI: Sign in", "icon": "$(sign-in)" },
+      { "command": "rai.logout", "title": "RAI: Sign out", "icon": "$(sign-out)" },
+      { "command": "rai.refresh", "title": "RAI: Refresh", "icon": "$(refresh)" },
+      { "command": "rai.openInWebApp", "title": "RAI: Open in web app", "icon": "$(globe)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "rai.refresh", "when": "view == rai.projects", "group": "navigation" },
+        { "command": "rai.login", "when": "view == rai.projects && !rai.signedIn", "group": "navigation" },
+        { "command": "rai.logout", "when": "view == rai.projects && rai.signedIn", "group": "navigation" }
+      ]
+    },
+    "configuration": {
+      "title": "RAI",
+      "properties": {
+        "rai.apiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the RAI Platform REST API."
+        },
+        "rai.webBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:4000",
+          "description": "Base URL of the RAI Platform web app (used for deep-links)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc --noEmit",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "node esbuild.mjs --production"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0"
+  }
+}
