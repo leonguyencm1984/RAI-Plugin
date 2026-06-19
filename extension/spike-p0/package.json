@@ -1,0 +1,57 @@
+{
+  "name": "rai-antigravity-spike",
+  "displayName": "RAI Antigravity P0 Spike",
+  "description": "Feasibility probe — verifies SecretStorage + webview + tree view + env APIs in the host IDE (Antigravity / VS Code).",
+  "version": "0.0.1",
+  "publisher": "rikkeisoft",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "raiSpike",
+          "title": "RAI Spike",
+          "icon": "media/spike.svg"
+        }
+      ]
+    },
+    "views": {
+      "raiSpike": [
+        {
+          "id": "raiSpike.results",
+          "name": "P0 Probe Results"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "raiSpike.run",
+        "title": "RAI Spike: Run P0 probes",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "raiSpike.showReport",
+        "title": "RAI Spike: Show probe report"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "raiSpike.run",
+          "when": "view == raiSpike.results",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}
