@@ -8,9 +8,13 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "main": "./dist/extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -23,20 +27,95 @@
     },
     "views": {
       "rai": [
-        { "id": "rai.projects", "name": "Projects" }
+        {
+          "id": "rai.projects",
+          "name": "Projects"
+        },
+        {
+          "id": "rai.status",
+          "name": "Sync Status"
+        }
       ]
     },
     "commands": [
-      { "command": "rai.login", "title": "RAI: Sign in", "icon": "$(sign-in)" },
-      { "command": "rai.logout", "title": "RAI: Sign out", "icon": "$(sign-out)" },
-      { "command": "rai.refresh", "title": "RAI: Refresh", "icon": "$(refresh)" },
-      { "command": "rai.openInWebApp", "title": "RAI: Open in web app", "icon": "$(globe)" }
+      {
+        "command": "rai.login",
+        "title": "RAI: Sign in",
+        "icon": "$(sign-in)"
+      },
+      {
+        "command": "rai.logout",
+        "title": "RAI: Sign out",
+        "icon": "$(sign-out)"
+      },
+      {
+        "command": "rai.refresh",
+        "title": "RAI: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rai.openInWebApp",
+        "title": "RAI: Open in web app",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "rai.pullAll",
+        "title": "RAI: Pull all (KB, skills, workflows)",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "rai.push",
+        "title": "RAI: Push skills",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "rai.pullRepos",
+        "title": "RAI: Pull repository",
+        "icon": "$(repo-clone)"
+      },
+      {
+        "command": "rai.applyOnboarding",
+        "title": "RAI: Apply repository onboarding",
+        "icon": "$(checklist)"
+      }
     ],
     "menus": {
       "view/title": [
-        { "command": "rai.refresh", "when": "view == rai.projects", "group": "navigation" },
-        { "command": "rai.login", "when": "view == rai.projects && !rai.signedIn", "group": "navigation" },
-        { "command": "rai.logout", "when": "view == rai.projects && rai.signedIn", "group": "navigation" }
+        {
+          "command": "rai.refresh",
+          "when": "view == rai.projects",
+          "group": "navigation"
+        },
+        {
+          "command": "rai.login",
+          "when": "view == rai.projects && !rai.signedIn",
+          "group": "navigation"
+        },
+        {
+          "command": "rai.logout",
+          "when": "view == rai.projects && rai.signedIn",
+          "group": "navigation"
+        },
+        {
+          "command": "rai.pullAll",
+          "when": "view == rai.status && rai.signedIn",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rai.push",
+          "when": "view == rai.status && rai.signedIn",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rai.refresh",
+          "when": "view == rai.status",
+          "group": "navigation@3"
+        },
+        {
+          "command": "rai.pullRepos",
+          "when": "view == rai.projects && rai.signedIn",
+          "group": "navigation@2"
+        }
       ]
     },
     "configuration": {
@@ -51,6 +130,11 @@
           "type": "string",
           "default": "http://localhost:4000",
           "description": "Base URL of the RAI Platform web app (used for deep-links)."
+        },
+        "rai.vaultPath": {
+          "type": "string",
+          "default": ".rkm",
+          "description": "Workspace-relative directory for the local RAI vault (KB, skills, workflows)."
         }
       }
     }
@@ -62,7 +146,11 @@
     "package": "vsce package --no-dependencies",
     "vscode:prepublish": "node esbuild.mjs --production"
   },
+  "dependencies": {
+    "adm-zip": "^0.5.17"
+  },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^20",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.0",
